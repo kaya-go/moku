@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moku"
+version = "0.1.0"
+description = "Object detection model for converting goban photos to SGF files"
+authors = [{ name = "Hadrien Mary", email = "hadrien.mary@gmail.com" }]
+dependencies = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["I"]
+
+[project.scripts]
+moku = "moku.cli:app"
