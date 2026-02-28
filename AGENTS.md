@@ -38,13 +38,15 @@ moku/
 │   └── progress.md            # Current progress and next steps
 ├── notebooks/
 │   ├── 01_Build_Dataset.ipynb # Dataset creation and upload to HF
-│   ├── 02_Train_Model.ipynb   # Model fine-tuning (future)
-│   ├── 03_Evaluate.ipynb      # Model evaluation (future)
+│   ├── 02_Train_Model.ipynb   # Model fine-tuning with HF Trainer
+│   ├── 03_Evaluate.ipynb      # Model evaluation, run comparison, HP tracking
 │   └── 04_Export_ONNX.ipynb   # ONNX export (future)
 ├── src/moku/
 │   ├── __init__.py
 │   ├── cli.py                 # CLI entry point
-│   └── dataset.py             # Dataset loading and harmonization utilities
+│   ├── dataset.py             # Dataset loading and harmonization utilities
+│   ├── training.py            # Training utilities (transforms, collate, mAP eval)
+│   └── viz.py                 # Visualization utilities
 ├── pixi.toml
 └── pyproject.toml
 ```
@@ -58,17 +60,21 @@ moku/
 
 ## Detection Categories
 
-The harmonized dataset uses 3 categories for stone detection:
+The harmonized dataset uses 3 categories:
 
-| ID | Name           | Description                    |
-|----|----------------|--------------------------------|
-| 0  | `board`        | Full Go board bounding box     |
-| 1  | `black_stone`  | Individual black stone         |
-| 2  | `white_stone`  | Individual white stone          |
+| ID | Name           | Description                                        |
+|----|----------------|----------------------------------------------------|
+| 0  | `black_stone`  | Individual black stone                              |
+| 1  | `white_stone`  | Individual white stone                              |
+| 2  | `board_corner` | Board corner point (small bbox at each corner)      |
 
-Categories like `empty`, `empty_edge`, `empty_corner`, `board_corner` from source datasets are **dropped** — empty intersections are inferred from board geometry and stone positions during SGF conversion.
+Board corners enable perspective-corrected grid inference via homography.
+For go_game_v10, real `board_corner` annotations are used directly.
+For go_chess, synthetic 20×20 corner bboxes are generated from board segmentation polygons.
 
-**Partial board views**: The model must handle photos where only part of the goban is visible (1–3 corners). The 3 categories above already cover this. Future datasets should include partial board photos.
+Categories like `empty`, `empty_edge`, `empty_corner`, `board` (full bbox) from source datasets are **dropped** — empty intersections are inferred from board geometry and stone positions during SGF conversion.
+
+**Partial board views**: The model must handle photos where only part of the goban is visible (1–3 corners). Future datasets should include partial board photos.
 
 ## Raw Data Sources
 

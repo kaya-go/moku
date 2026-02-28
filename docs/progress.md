@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Phase**: Dataset creation (Step 1 of 5)
+**Phase**: Training (Step 2 of 5)
 
 ## Completed
 
@@ -16,18 +16,32 @@
 - [x] Created documentation (AGENTS.md, docs/)
 - [x] Built dataset harmonization code in `src/moku/dataset.py`
 - [x] Created `01_Build_Dataset.ipynb` notebook
+- [x] Created training utilities in `src/moku/training.py`
+- [x] Created `02_Train_Model.ipynb` — fine-tune RT-DETR locally with HF Trainer
+- [x] Created `03_Evaluate.ipynb` — mAP evaluation, prediction visualization, run comparison
 
 ## In Progress
 
-- [ ] Run notebook and push dataset to `kaya-go/moku-v1` on HF Hub
+- [ ] Run `01_Build_Dataset.ipynb` and push dataset to `kaya-go/moku-v1` on HF Hub
+- [ ] Run `02_Train_Model.ipynb` baseline training
+- [ ] Run HP tuning sweep (6-8 configs: LR × weight decay)
 
 ## Next Steps
 
-1. **Push dataset**: Execute `01_Build_Dataset.ipynb` to create and upload `kaya-go/moku-v1`
-2. **Training notebook**: Create `02_Train_Model.ipynb` — fine-tune RT-DETR r18vd
-3. **Evaluation notebook**: Create `03_Evaluate.ipynb` — compute mAP metrics
-4. **ONNX export**: Create `04_Export_ONNX.ipynb` — export and verify ONNX model
-5. **Publish model**: Upload ONNX model to `kaya-go/moku-v1` on HF Hub
+1. **Push dataset**: Execute `01_Build_Dataset.ipynb` to upload `kaya-go/moku-v1`
+2. **Baseline training**: Run `02_Train_Model.ipynb` with default HPs
+3. **HP tuning**: Run sweep configs, compare in `03_Evaluate.ipynb`, pick best
+4. **Push best model**: Push best checkpoint to `kaya-go/moku-v1` on HF Hub
+5. **ONNX export**: Create `04_Export_ONNX.ipynb` — export and verify ONNX model
+6. **Publish model**: Upload ONNX model to `kaya-go/moku-v1` on HF Hub
+
+## HP Tuning Strategy
+
+- **Grid search** on `learning_rate` × `weight_decay` (4 × 2 = 8 configs)
+- LR: `[5e-5, 1e-4, 2e-4, 5e-4]`, WD: `[1e-4, 1e-3]`
+- 50 epochs each with cosine LR schedule + early stopping via `load_best_model_at_end`
+- Compare using eval_loss curves and test mAP in `03_Evaluate.ipynb`
+- For GPU runs: change `RUN_NAME` in `02_Train_Model.ipynb`, download results to `runs/`
 
 ## Decisions Log
 
@@ -37,3 +51,5 @@
 | 2026-02-28 | Drop empty/corner categories | Inferred from geometry; reduces model complexity |
 | 2026-02-28 | Use RT-DETR r18vd | No NMS, small model, HF transformers native, no vendor libs |
 | 2026-02-28 | 3 categories: board, black_stone, white_stone | Minimal set sufficient for SGF conversion |
+| 2026-02-28 | Simple grid search over LR × WD | Small dataset; LR is most impactful HP; 8 runs is manageable |
+| 2026-02-28 | Random horizontal flip as sole augmentation | Minimal viable augmentation; more can be added later |

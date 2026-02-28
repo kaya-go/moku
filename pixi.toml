@@ -8,7 +8,7 @@ version = "0.1.0"
 [tasks]
 
 [dependencies]
-python = ">=3.13,<4"
+python = ">=3.12,<4"
 jupyterlab = "*"
 httpx = "*"
 ruff = "*"
@@ -18,15 +18,21 @@ tqdm = "*"
 ipykernel = "*"
 platformdirs = "*"
 onnxruntime = ">=1.22.2"
-pandas = ">=3.0.1"
+pandas = "*"
 typer = "*"
 huggingface_hub = ">=1.5.0"
 datasets = ">=4.6.0"
 transformers = ">=5.2.0"
 matplotlib = ">=3.10.8"
-pillow = ">=12.1.1"
+pillow = "*"
 scikit-learn = ">=1.8.0,<2"
 numpy = ">=2.4.2,<3"
+torchvision = ">=0.25.0,<0.26"
+torchmetrics = ">=1.8.2,<2"
+accelerate = ">=1.12.0,<2"
+trackio = ">=0.15.0"
+gradio = ">=6.3.0"
+pycocotools = ">=2.0.11,<3"
 
 [pypi-dependencies]
 moku = { path = ".", editable = true }
