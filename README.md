@@ -2,7 +2,10 @@
 
 Object detection model for converting goban (Go board) photos and screenshots to SGF files.
 
-The trained models are exported to ONNX and uploaded to Hugging Face: **[kaya-go/moku](https://huggingface.co/kaya-go/moku)**
+| Resource | Link |
+|----------|------|
+| Model | [kaya-go/moku-v1](https://huggingface.co/kaya-go/moku-v1) |
+| Dataset | [kaya-go/moku-v1](https://huggingface.co/datasets/kaya-go/moku-v1) |
 
 These ONNX models power the [Kaya](https://github.com/kaya-go/kaya) app, enabling automatic game transcription from board images.
 
