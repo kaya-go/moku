@@ -10,6 +10,9 @@ Your goal is to assist in building an object detection model that converts goban
 - **Repository**: `moku`
 - **Purpose**: Object detection model for goban image recognition and SGF conversion.
 - **Target**: WebAssembly (WASM) via ONNX Runtime in the Kaya web app.
+- **HF Organization**: `kaya-go` on Hugging Face Hub.
+- **Dataset**: `kaya-go/moku-v1` on Hugging Face Hub.
+- **Model**: `kaya-go/moku-v1` (fine-tuned RT-DETR) on Hugging Face Hub.
 
 ## Tech Stack & Environment
 
@@ -17,25 +20,84 @@ Your goal is to assist in building an object detection model that converts goban
 - **Languages**: Python.
 - **Key Libraries**:
   - `pytorch` (Model training & handling)
-  - `onnx`, `onnxruntime` (Export & Verification)
+  - `transformers` (Model loading, training, image processing)
+  - `datasets` (HF dataset creation, loading, pushing)
+  - `onnx`, `onnxruntime` (Export & verification)
   - `httpx` (Data fetching)
+  - `huggingface_hub` (HF Hub interactions)
 - **Linting**: `ruff`
 
-## Workflow
+## Project Architecture
 
-1. **Dataset**: Build training dataset from goban images and SGF files.
-2. **Train**: Train object detection model to recognize board positions.
-3. **Evaluate**: Validate model accuracy on test datasets.
-4. **Export**: Convert to ONNX using `torch.onnx.export`.
-   - MUST use dynamic axes for batch size.
-5. **Publish**: Upload ONNX models to Hugging Face Hub.
+```
+moku/
+├── AGENTS.md                  # This file - project instructions for AI agents
+├── docs/
+│   ├── architecture.md        # Architecture decisions and design
+│   ├── dataset.md             # Dataset details, sources, harmonization
+│   └── progress.md            # Current progress and next steps
+├── notebooks/
+│   ├── 01_Build_Dataset.ipynb # Dataset creation and upload to HF
+│   ├── 02_Train_Model.ipynb   # Model fine-tuning (future)
+│   ├── 03_Evaluate.ipynb      # Model evaluation (future)
+│   └── 04_Export_ONNX.ipynb   # ONNX export (future)
+├── src/moku/
+│   ├── __init__.py
+│   ├── cli.py                 # CLI entry point
+│   └── dataset.py             # Dataset loading and harmonization utilities
+├── pixi.toml
+└── pyproject.toml
+```
+
+## Pipeline Overview
+
+1. **Dataset** (`01_Build_Dataset.ipynb`): Harmonize raw COCO datasets into a single HF dataset (`kaya-go/moku-v1`) with unified categories.
+2. **Train** (`02_Train_Model.ipynb`): Fine-tune RT-DETR (r18vd) from `PekingU/rtdetr_r18vd` on the harmonized dataset.
+3. **Evaluate** (`03_Evaluate.ipynb`): Validate model with mAP metrics on test set.
+4. **Export** (`04_Export_ONNX.ipynb`): Convert to ONNX with dynamic axes for batch size. Publish to HF Hub.
+
+## Detection Categories
+
+The harmonized dataset uses 3 categories for stone detection:
+
+| ID | Name           | Description                    |
+|----|----------------|--------------------------------|
+| 0  | `board`        | Full Go board bounding box     |
+| 1  | `black_stone`  | Individual black stone         |
+| 2  | `white_stone`  | Individual white stone          |
+
+Categories like `empty`, `empty_edge`, `empty_corner`, `board_corner` from source datasets are **dropped** — empty intersections are inferred from board geometry and stone positions during SGF conversion.
+
+**Partial board views**: The model must handle photos where only part of the goban is visible (1–3 corners). The 3 categories above already cover this. Future datasets should include partial board photos.
+
+## Raw Data Sources
+
+Raw datasets are stored at `/Users/hadim/Data/moku/raw/` (not committed to repo):
+
+| Dataset | Dir Name | Images | Kept Categories | Notes |
+|---------|----------|--------|-----------------|-------|
+| Go Game detection v10 | `Go Game detection.v10i.coco` | 256 | board, black_stone, white_stone | Primary dataset. Superset of v1. |
+| Go game detection v1 | `Go game detection.v1i.coco` | 243 | — | **Skipped**: fully contained in v10. |
+| go-chess 2 v3 | `go-chess 2.v3-go-chess.v1.coco` | 236 | goboard→board, black_stone, white_stone | Different source images. |
+
+## Model Choice: RT-DETR r18vd
+
+- **Why**: Transformer-based detector, no NMS needed (simpler ONNX export), small ResNet-18 backbone suitable for browser inference, available in HF `transformers`.
+- **Base model**: `PekingU/rtdetr_r18vd`
+- **Training**: Fine-tune with HF `Trainer` API.
+- **Export**: `torch.onnx.export` with dynamic axes for batch dimension.
 
 ## Rules & Guidelines
 
+- **Language**: All code, comments, documentation, commit messages, variable names, and any other text in this repository MUST be written in English. No exceptions.
 - **Dependency Management**: Always use `pixi add <package>` to install dependencies.
 - **Code Style**: Adhere to `ruff` defaults.
-- **Notebooks**: Maintain clean cells; use Markdown for documentation.
+- **Module size**: No Python file in `src/moku/` should exceed 600 lines. If a module grows beyond this limit, refactor it or split it into submodules.
+- **Notebooks**: Maintain clean cells; use Markdown for documentation. Keep notebooks executable on an M3 MacBook. For long training jobs, use HF Jobs. Prefer `pandas.DataFrame` + `display()` over loops of `print()` for summarizing data.
+- **Library code**: Reusable or long functions go in `src/moku/`. Notebooks import from `moku`.
 - **Paths**: Use relative paths from project root.
+- **No vendor libraries**: Only standard/HF ecosystem libraries (transformers, datasets, torch, etc.). No ultralytics, roboflow SDK, etc.
+- **Documentation**: Keep `AGENTS.md` and `docs/` always up to date with current state, decisions, and progress.
 - **Commit Messages**: Follow [Conventional Commits](https://www.conventionalcommits.org/) format:
   - `feat:` for new features
   - `fix:` for bug fixes
