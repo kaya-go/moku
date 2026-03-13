@@ -23,3 +23,7 @@ build/
 
 artifacts/
 runs/
+
+# Data files
+data/
+notebooks/data/
