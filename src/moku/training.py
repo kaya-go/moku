@@ -143,7 +143,16 @@ def evaluate_map(
     model = model.to(device)
     model.eval()
 
-    metric = MeanAveragePrecision(box_format="xyxy", iou_type="bbox")
+    # max_detection_thresholds raised to 400 because a full 19x19 goban can have
+    # up to 361 stones + 4 board corners = 365 detections per image.
+    # backend="faster_coco_eval" is required for correct map with custom thresholds.
+    metric = MeanAveragePrecision(
+        box_format="xyxy",
+        iou_type="bbox",
+        max_detection_thresholds=[1, 10, 400],
+        class_metrics=True,
+        backend="faster_coco_eval",
+    )
 
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 
@@ -183,19 +192,37 @@ def evaluate_map(
 
 
 def format_map_results(metrics: dict) -> pd.DataFrame:
-    """Format mAP results as a clean DataFrame for display."""
+    """Format overall mAP results as a clean DataFrame for display."""
     rows = [
-        {"metric": "mAP", "value": metrics.get("map", float("nan"))},
-        {"metric": "mAP@50", "value": metrics.get("map_50", float("nan"))},
-        {"metric": "mAP@75", "value": metrics.get("map_75", float("nan"))},
-        {"metric": "mAR@100", "value": metrics.get("mar_100", float("nan"))},
+        {"metric": "mAP@50:95", "value": round(float(metrics.get("map", 0)), 4)},
+        {"metric": "mAP@50", "value": round(float(metrics.get("map_50", 0)), 4)},
+        {"metric": "mAP@75", "value": round(float(metrics.get("map_75", 0)), 4)},
+        {"metric": "mAR@400", "value": round(float(metrics.get("mar_400", 0)), 4)},
     ]
+    return pd.DataFrame(rows)
+
+
+def format_map_per_class(metrics: dict) -> pd.DataFrame:
+    """Format per-class AP results as a clean DataFrame for display.
+
+    Returns one row per category with AP@50:95 and AP@50 values.
+    """
     per_class = metrics.get("map_per_class")
-    if per_class is not None and hasattr(per_class, "__iter__"):
-        for i, ap in enumerate(per_class):
-            name = ID_TO_CATEGORY.get(i, f"class_{i}")
-            val = ap.item() if hasattr(ap, "item") else ap
-            rows.append({"metric": f"AP({name})", "value": val})
+    per_class_50 = metrics.get("map_per_class_50")  # may not be present in all torchmetrics versions
+
+    if per_class is None or not hasattr(per_class, "__iter__"):
+        return pd.DataFrame(columns=["category", "AP@50:95"])
+
+    rows = []
+    for i, ap in enumerate(per_class):
+        name = ID_TO_CATEGORY.get(i, f"class_{i}")
+        val = ap.item() if hasattr(ap, "item") else float(ap)
+        row: dict = {"category": name, "AP@50:95": round(val, 4)}
+        if per_class_50 is not None and hasattr(per_class_50, "__iter__"):
+            ap50 = list(per_class_50)[i]
+            ap50_val = ap50.item() if hasattr(ap50, "item") else float(ap50)
+            row["AP@50"] = round(ap50_val, 4)
+        rows.append(row)
     return pd.DataFrame(rows)
 
 

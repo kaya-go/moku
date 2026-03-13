@@ -12,6 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 from datasets import Dataset, DatasetDict
 from datasets import Image as HFImage
 from scipy.spatial import ConvexHull
@@ -120,8 +121,31 @@ def _corners_from_segmentation(segmentation: list) -> list[list[float]]:
 
 
 # Default size for synthesized board_corner bounding boxes (go_chess).
-# Matches the average size of real board_corner bboxes in go_game_v10.
-_SYNTHETIC_CORNER_SIZE = 20.0
+# Size is computed proportionally to board span; these are the tuning constants.
+_SYNTHETIC_CORNER_SIZE_FRACTION = 0.028  # ~2.8% of avg board span
+_SYNTHETIC_CORNER_SIZE_MIN = 15.0  # minimum 15px regardless of board size
+_SYNTHETIC_CORNER_SIZE_FALLBACK = 20.0  # used when board span cannot be computed
+
+
+def _corner_bbox_size(corners: list[list[float]]) -> float:
+    """Compute board_corner bbox size proportional to the board span.
+
+    Uses ~2.8% of the average board span (mean of width and height),
+    with a 15 px minimum. Falls back to 20 px if corners are degenerate.
+
+    Corners must be in TL, TR, BR, BL order (from ``_sort_corners_clockwise``).
+    """
+    if len(corners) < 4:
+        return _SYNTHETIC_CORNER_SIZE_FALLBACK
+    pts = np.array(corners)
+    # Board width: average of top edge (TL→TR) and bottom edge (BL→BR)
+    widths = [np.linalg.norm(pts[1] - pts[0]), np.linalg.norm(pts[2] - pts[3])]
+    # Board height: average of left edge (TL→BL) and right edge (TR→BR)
+    heights = [np.linalg.norm(pts[3] - pts[0]), np.linalg.norm(pts[2] - pts[1])]
+    span = (sum(widths) + sum(heights)) / 4
+    if span < 1.0:
+        return _SYNTHETIC_CORNER_SIZE_FALLBACK
+    return max(_SYNTHETIC_CORNER_SIZE_MIN, span * _SYNTHETIC_CORNER_SIZE_FRACTION)
 
 
 def harmonize_coco_split(
@@ -188,14 +212,16 @@ def harmonize_coco_split(
         # Synthesize board_corner annotations from segmentation (go_chess)
         if board_seg is not None:
             corners = _corners_from_segmentation(board_seg)
-            half = _SYNTHETIC_CORNER_SIZE / 2
-            for cx, cy in corners:
-                ann_ids.append(ann_id)
-                ann_id += 1
-                bboxes.append([cx - half, cy - half, _SYNTHETIC_CORNER_SIZE, _SYNTHETIC_CORNER_SIZE])
-                category_ids.append(CATEGORIES["board_corner"])
-                areas.append(_SYNTHETIC_CORNER_SIZE * _SYNTHETIC_CORNER_SIZE)
-                iscrowd.append(0)
+            if corners:
+                size = _corner_bbox_size(corners)
+                half = size / 2
+                for cx, cy in corners:
+                    ann_ids.append(ann_id)
+                    ann_id += 1
+                    bboxes.append([cx - half, cy - half, size, size])
+                    category_ids.append(CATEGORIES["board_corner"])
+                    areas.append(size * size)
+                    iscrowd.append(0)
 
         # Skip images with no kept annotations
         if not bboxes:
@@ -330,3 +356,146 @@ def compute_split_stats(ds: Dataset) -> dict:
         "category_counts": Counter(all_categories),
         "source_counts": Counter(sources),
     }
+
+
+# ---------------------------------------------------------------------------
+# Corner annotation audit & correction utilities
+# ---------------------------------------------------------------------------
+
+
+def _audit_split(ds: Dataset, split_name: str, expected_count: int) -> list[dict]:
+    """Run corner audit on a single dataset split. Returns rows for flagged images."""
+    corner_cat = CATEGORIES["board_corner"]
+    rows = []
+
+    for sample in ds:
+        objects = sample["objects"]
+        corner_boxes = [(bbox, cat) for bbox, cat in zip(objects["bbox"], objects["category"]) if cat == corner_cat]
+        n_corners = len(corner_boxes)
+        issues: list[str] = []
+
+        if n_corners != expected_count:
+            issues.append(f"wrong_count ({n_corners} vs {expected_count})")
+
+        if n_corners >= 2:
+            w, h = sample["width"], sample["height"]
+            cx_img, cy_img = w / 2, h / 2
+
+            # Check corners are in distinct quadrants
+            quadrants: set[str] = set()
+            for (x, y, bw, bh), _ in corner_boxes:
+                bcx = x + bw / 2
+                bcy = y + bh / 2
+                q = ("T" if bcy < cy_img else "B") + ("L" if bcx < cx_img else "R")
+                quadrants.add(q)
+
+            if len(quadrants) < n_corners:
+                issues.append(f"duplicate_quadrant ({sorted(quadrants)})")
+
+            if n_corners == expected_count and len(quadrants) < expected_count:
+                issues.append("not_in_4_quadrants")
+
+            # Check bbox size relative to image area
+            img_area = w * h
+            for (x, y, bw, bh), _ in corner_boxes:
+                rel = (bw * bh) / img_area
+                if rel < 1e-5:
+                    issues.append(f"too_small ({bw * bh:.1f} px\u00b2)")
+                    break
+                if rel > 0.01:
+                    issues.append(f"too_large ({bw * bh:.1f} px\u00b2)")
+                    break
+
+        if issues:
+            rows.append(
+                {
+                    "split": split_name,
+                    "image_id": sample.get("image_id", -1),
+                    "source_dataset": sample.get("source_dataset", "unknown"),
+                    "n_corners": n_corners,
+                    "issues": ", ".join(issues),
+                }
+            )
+
+    return rows
+
+
+def audit_corners(dataset_or_dict, expected_count: int = 4) -> pd.DataFrame:
+    """Audit board_corner annotations for quality issues.
+
+    For each image, checks:
+    - Correct number of corners (default: 4)
+    - Corners appear in 4 distinct quadrants of the image
+    - Corner bbox sizes are reasonable relative to image area
+
+    Args:
+        dataset_or_dict: A ``Dataset`` or ``DatasetDict``. If ``DatasetDict``,
+            all splits are audited and a ``split`` column is added.
+        expected_count: Expected number of board_corner annotations per image.
+
+    Returns:
+        DataFrame with one row per flagged image: split, image_id,
+        source_dataset, n_corners, issues.
+    """
+    if hasattr(dataset_or_dict, "items"):
+        rows: list[dict] = []
+        for split_name, ds in dataset_or_dict.items():
+            rows.extend(_audit_split(ds, split_name, expected_count))
+        return pd.DataFrame(rows)
+
+    return pd.DataFrame(_audit_split(dataset_or_dict, "dataset", expected_count))
+
+
+def apply_corner_corrections(dataset: DatasetDict, corrections: dict) -> DatasetDict:
+    """Apply human-corrected board_corner annotations to a DatasetDict.
+
+    Corrected boxes (from the HTML/JS annotator) replace the existing
+    board_corner annotations for each image. Non-corner annotations are
+    kept unchanged.
+
+    Args:
+        dataset: The original ``DatasetDict``.
+        corrections: Dict mapping ``str(image_id)`` to
+            ``{"boxes": [{"id", "x", "y", "w", "h", "category"}, ...]}``.
+
+    Returns:
+        A new ``DatasetDict`` with corrected corner annotations.
+    """
+    corner_cat = CATEGORIES["board_corner"]
+    str_corrections = {str(k): v for k, v in corrections.items()}
+
+    def _apply(sample: dict) -> dict:
+        iid = str(sample["image_id"])
+        if iid not in str_corrections:
+            return sample
+
+        corr_boxes = [b for b in str_corrections[iid].get("boxes", []) if b.get("category") == corner_cat]
+
+        objects = sample["objects"]
+        non_corner_idx = [i for i, c in enumerate(objects["category"]) if c != corner_cat]
+
+        new_ids = [objects["id"][i] for i in non_corner_idx]
+        new_bboxes = [objects["bbox"][i] for i in non_corner_idx]
+        new_cats = [objects["category"][i] for i in non_corner_idx]
+        new_areas = [objects["area"][i] for i in non_corner_idx]
+        new_iscrowd = [objects["iscrowd"][i] for i in non_corner_idx]
+
+        for box in corr_boxes:
+            new_ids.append(int(box["id"]))
+            new_bboxes.append([box["x"], box["y"], box["w"], box["h"]])
+            new_cats.append(corner_cat)
+            new_areas.append(box["w"] * box["h"])
+            new_iscrowd.append(0)
+
+        return {
+            **sample,
+            "objects": {
+                "id": new_ids,
+                "bbox": new_bboxes,
+                "category": new_cats,
+                "area": new_areas,
+                "iscrowd": new_iscrowd,
+            },
+        }
+
+    return DatasetDict({split: ds.map(_apply) for split, ds in dataset.items()})

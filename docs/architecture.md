@@ -16,9 +16,19 @@ In the Kaya web app, the ONNX model runs in the browser via ONNX Runtime WebAsse
 
 We detect 3 object categories:
 
-1. **board** — Bounding box of the full Go board. Used to define the playing area and for perspective/crop normalization.
-2. **black_stone** — Individual black stones on the board.
-3. **white_stone** — Individual white stones on the board.
+| ID | Name | Description |
+|----|------|-------------|
+| 0 | `black_stone` | Individual black stone |
+| 1 | `white_stone` | Individual white stone |
+| 2 | `board_corner` | Board corner point (small bbox at each corner) |
+
+### Why board_corner instead of full board bbox?
+
+Board corners enable **homography-based perspective correction**: given 4 corner points, we compute a homographic transform mapping image coordinates to a normalized [0,1]×[0,1] board space. This is more robust to angled/tilted photos than using a full board bounding box.
+
+- A 4-point homography corrects for perspective distortion automatically.
+- Works even with partial boards (1–3 visible corners).
+- Avoids the need to estimate grid spacing from stone density.
 
 ### Why not detect empty intersections?
 
@@ -26,26 +36,24 @@ Source datasets annotate empty intersections (`empty`, `empty_edge`, `empty_corn
 
 - Empty intersections vastly outnumber stones, creating class imbalance.
 - Detecting 361 empty intersections on a 19x19 board is wasteful when they can be inferred.
-- The board bounding box + stone positions are sufficient to reconstruct the full board state.
+- Board corners + stone positions are sufficient to reconstruct the full board state.
 - Fewer categories = simpler model, faster inference, smaller ONNX file.
 
 ### Partial Board Views
 
-The model must handle photos where only part of the goban is visible (e.g., 1, 2, or 3 corners showing). This is common in real-world usage (close-up shots, angled photos). The current 3 categories already cover this:
+The model must handle photos where only part of the goban is visible (e.g., 1, 2, or 3 corners showing). This is common in real-world usage (close-up shots, angled photos):
 
-- A partial board still has a `board` bounding box (covering the visible portion).
-- Only the visible stones are annotated.
-- The downstream SGF conversion must handle partial boards (e.g., infer grid from visible stones/edges).
-
-Future data collection should include partial board photos to improve robustness.
+- Only the visible corners and stones are annotated.
+- `src/moku/grid.py` handles 1–4 visible corners via the homography solver.
+- Dataset v2 should explicitly include partial board images to improve robustness.
 
 ### SGF Conversion (downstream, not in this repo)
 
 After detection, the Kaya app will:
 
-1. Use the board bounding box to identify the playing area.
-2. Estimate the grid size (9x9, 13x13, or 19x19) from stone density and spacing.
-3. Map each stone's center to the nearest grid intersection.
+1. Use the detected `board_corner` points to compute a homography.
+2. Transform all stone centers to normalized board space via homography.
+3. Snap to nearest grid intersection based on board size (9, 13, or 19).
 4. Generate an SGF string with all stone positions.
 
 ## Model Choice: RT-DETR r18vd
@@ -82,6 +90,45 @@ Key advantages:
 - Verify with `onnxruntime` before publishing.
 - Published to `kaya-go/moku-v1` on Hugging Face Hub.
 
-## Dataset: kaya-go/moku-v1
+## Dataset: kaya-go/moku-v1 → v2
 
 See [dataset.md](dataset.md) for full details on sources, harmonization, and statistics.
+
+## v2 Improvements Plan
+
+The v1 model achieves mAP@50:95 of **0.39**. The bottleneck is data, not architecture. RT-DETR r18vd is retained for v2.
+
+### Augmentation Overhaul
+
+v1 uses only horizontal flip. v2 adds an aggressive albumentations pipeline:
+
+| Type | Transforms |
+|------|------------|
+| Geometric | `Perspective`, `Rotate` (±15°), `HorizontalFlip`, `VerticalFlip`, `RandomCrop` |
+| Photometric | `ColorJitter`, `RandomGamma`, `GaussianBlur`, `MotionBlur`, `RandomShadow` |
+
+`Perspective` is the highest-priority augmentation for `board_corner` detection.
+
+### Synthetic Data Generator (`src/moku/synthetic.py`)
+
+Generates (PIL image, COCO annotations) pairs with perfect corner annotations:
+
+- Wood-grain board texture (Perlin noise)
+- Styled stones with specular highlights
+- Random perspective distortion
+- Lighting variations (vignette, gradient)
+- Partial board crops (simulating 1–3 visible corners)
+
+Target: 500 synthetic train / 100 val / 100 test images.
+
+### Pseudo-labeled Real Images (`src/moku/scraper.py`)
+
+Scrape real goban images from Flickr (CC license) and Reddit r/baduk → run v1 model → human review via HTML/JS annotator tool → add corrected samples to v2 training set.
+
+### Corner Re-annotation (`tools/annotator/`)
+
+HTML/JS tool (served via `python -m http.server`) with canvas magnifier for re-annotating suspicious board_corners in the v1 dataset.
+
+### Optional: RT-DETR r34vd
+
+RT-DETR r34vd (ResNet-34 backbone) doubles parameter count with the same ONNX export pipeline. Worth benchmarking after v2 data is assembled — but only if r18vd plateaus.

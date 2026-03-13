@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Moku Corner Annotator</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1a1a2e;
+      color: #e0e0e0;
+      font-family: 'Courier New', monospace;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      user-select: none;
+    }
+
+    /* ── Toolbar ── */
+    #toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 14px;
+      background: #16213e;
+      border-bottom: 1px solid #2a2a4a;
+      flex-shrink: 0;
+    }
+    #toolbar button {
+      padding: 4px 12px;
+      border: 1px solid #3a3a5a;
+      background: #0f3460;
+      color: #e0e0e0;
+      cursor: pointer;
+      border-radius: 3px;
+      font-size: 12px;
+      font-family: inherit;
+      transition: background 0.15s;
+    }
+    #toolbar button:hover { background: #1a5090; }
+    #toolbar .btn-save   { background: #0d6e39; }
+    #toolbar .btn-save:hover { background: #0a5230; }
+    #toolbar .btn-delete { background: #6e1d1d; }
+    #toolbar .btn-delete:hover { background: #521515; }
+    #image-counter { color: #888; font-size: 12px; min-width: 70px; }
+    #image-name    { color: #88aaff; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+    .spacer { flex: 1; }
+
+    /* ── Main area ── */
+    #main { display: flex; flex: 1; overflow: hidden; }
+
+    /* ── Image list sidebar ── */
+    #image-list {
+      width: 130px;
+      overflow-y: auto;
+      background: #16213e;
+      border-right: 1px solid #2a2a4a;
+      padding: 4px;
+      flex-shrink: 0;
+    }
+    .img-item {
+      padding: 4px 6px;
+      cursor: pointer;
+      font-size: 11px;
+      border-radius: 2px;
+      margin-bottom: 2px;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      border-left: 3px solid transparent;
+    }
+    .img-item:hover { background: #0f3460; }
+    .img-item.active { background: #e94560; color: #fff; border-left-color: #fff; }
+    .img-item.flagged    { border-left-color: #ff9900; }
+    .img-item.annotated  { border-left-color: #00cc88; }
+    .img-item.flagged.annotated { border-left-color: #aaff44; }
+    .img-num { color: #666; font-size: 10px; min-width: 22px; }
+    .img-src { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* ── Canvas area ── */
+    #canvas-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      background: #0d1117;
+      overflow: hidden;
+    }
+    #main-canvas { cursor: crosshair; display: block; }
+
+    /* ── Magnifier ── */
+    #mag-wrap {
+      position: absolute;
+      bottom: 14px;
+      right: 14px;
+      width: 180px;
+      height: 180px;
+      border-radius: 50%;
+      border: 2px solid #444;
+      overflow: hidden;
+      pointer-events: none;
+      background: #000;
+    }
+    #mag-canvas { display: block; }
+
+    /* ── Annotation panel ── */
+    #ann-panel {
+      width: 190px;
+      overflow-y: auto;
+      background: #16213e;
+      border-left: 1px solid #2a2a4a;
+      padding: 10px 8px;
+      font-size: 11px;
+      flex-shrink: 0;
+    }
+    #ann-panel h3 { color: #88aaff; margin-bottom: 8px; border-bottom: 1px solid #2a2a4a; padding-bottom: 4px; font-size: 12px; }
+    .grp-title { color: #ff9900; font-size: 10px; font-weight: bold; margin: 6px 0 4px; }
+    .ann-item {
+      display: flex; align-items: center; gap: 4px;
+      padding: 2px 4px; border-radius: 2px; cursor: pointer;
+    }
+    .ann-item:hover, .ann-item.sel { background: #0f3460; }
+    .corner-lbl { color: #ff6600; font-weight: bold; min-width: 22px; font-size: 11px; }
+    .ann-coords { color: #777; font-size: 10px; flex: 1; }
+    .del-btn { color: #e94560; background: none; border: none; cursor: pointer; font-size: 11px; padding: 0 2px; }
+    .del-btn:hover { color: #ff0000; }
+    .hint {
+      margin-top: 14px; padding: 8px; background: #0d1117;
+      border-radius: 3px; font-size: 10px; color: #666; line-height: 1.9;
+    }
+    .hint strong { color: #888; }
+
+    /* ── Status bar ── */
+    #status-bar {
+      padding: 3px 14px;
+      background: #16213e;
+      border-top: 1px solid #2a2a4a;
+      font-size: 10px;
+      color: #666;
+      white-space: nowrap;
+      overflow: hidden;
+      flex-shrink: 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="toolbar">
+    <button onclick="prevImage()">← Prev (P)</button>
+    <span id="image-counter">0 / 0</span>
+    <button onclick="nextImage()">Next (N) →</button>
+    <span id="image-name">—</span>
+    <div class="spacer"></div>
+    <button class="btn-delete" onclick="deleteSelected()">🗑 Delete (Del)</button>
+    <button class="btn-save"   onclick="saveAnnotations()">💾 Save (S)</button>
+  </div>
+
+  <div id="main">
+    <div id="image-list"></div>
+
+    <div id="canvas-wrap">
+      <canvas id="main-canvas"></canvas>
+      <div id="mag-wrap">
+        <canvas id="mag-canvas" width="180" height="180"></canvas>
+      </div>
+    </div>
+
+    <div id="ann-panel">
+      <h3>Annotations</h3>
+      <div id="ann-list"></div>
+    </div>
+  </div>
+
+  <div id="status-bar">Loading…</div>
+
+  <script src="annotator.js"></script>
+</body>
+</html>
