@@ -449,53 +449,61 @@ def audit_corners(dataset_or_dict, expected_count: int = 4) -> pd.DataFrame:
 def apply_corner_corrections(dataset: DatasetDict, corrections: dict) -> DatasetDict:
     """Apply human-corrected board_corner annotations to a DatasetDict.
 
-    Corrected boxes (from the HTML/JS annotator) replace the existing
+    Corrected boxes (from the Gradio annotator) replace the existing
     board_corner annotations for each image. Non-corner annotations are
     kept unchanged.
 
     Args:
         dataset: The original ``DatasetDict``.
-        corrections: Dict mapping ``str(image_id)`` to
-            ``{"boxes": [{"id", "x", "y", "w", "h", "category"}, ...]}``.
+        corrections: Dict mapping ``"split__rowIdx"`` to
+            ``{"boxes": [{"id", "x", "y", "w", "h", "category"}, ...],
+              "split": str, "row_idx": int}``.
 
     Returns:
         A new ``DatasetDict`` with corrected corner annotations.
     """
     corner_cat = CATEGORIES["board_corner"]
-    str_corrections = {str(k): v for k, v in corrections.items()}
 
-    def _apply(sample: dict) -> dict:
-        iid = str(sample["image_id"])
-        if iid not in str_corrections:
-            return sample
+    # Build lookup: (split, row_idx) → correction entry
+    corr_lookup: dict[tuple[str, int], dict] = {}
+    for _key, val in corrections.items():
+        corr_lookup[(val["split"], val["row_idx"])] = val
 
-        corr_boxes = [b for b in str_corrections[iid].get("boxes", []) if b.get("category") == corner_cat]
+    def _make_apply(split_name: str):
+        def _apply(sample: dict, idx: int) -> dict:
+            corr = corr_lookup.get((split_name, idx))
+            if corr is None:
+                return sample
 
-        objects = sample["objects"]
-        non_corner_idx = [i for i, c in enumerate(objects["category"]) if c != corner_cat]
+            corr_boxes = [b for b in corr.get("boxes", []) if b.get("category") == corner_cat]
 
-        new_ids = [objects["id"][i] for i in non_corner_idx]
-        new_bboxes = [objects["bbox"][i] for i in non_corner_idx]
-        new_cats = [objects["category"][i] for i in non_corner_idx]
-        new_areas = [objects["area"][i] for i in non_corner_idx]
-        new_iscrowd = [objects["iscrowd"][i] for i in non_corner_idx]
+            objects = sample["objects"]
+            non_corner_idx = [i for i, c in enumerate(objects["category"]) if c != corner_cat]
 
-        for box in corr_boxes:
-            new_ids.append(int(box["id"]))
-            new_bboxes.append([box["x"], box["y"], box["w"], box["h"]])
-            new_cats.append(corner_cat)
-            new_areas.append(box["w"] * box["h"])
-            new_iscrowd.append(0)
+            new_ids = [objects["id"][i] for i in non_corner_idx]
+            new_bboxes = [objects["bbox"][i] for i in non_corner_idx]
+            new_cats = [objects["category"][i] for i in non_corner_idx]
+            new_areas = [objects["area"][i] for i in non_corner_idx]
+            new_iscrowd = [objects["iscrowd"][i] for i in non_corner_idx]
 
-        return {
-            **sample,
-            "objects": {
-                "id": new_ids,
-                "bbox": new_bboxes,
-                "category": new_cats,
-                "area": new_areas,
-                "iscrowd": new_iscrowd,
-            },
-        }
+            for box in corr_boxes:
+                new_ids.append(int(box["id"]))
+                new_bboxes.append([box["x"], box["y"], box["w"], box["h"]])
+                new_cats.append(corner_cat)
+                new_areas.append(box["w"] * box["h"])
+                new_iscrowd.append(0)
 
-    return DatasetDict({split: ds.map(_apply) for split, ds in dataset.items()})
+            return {
+                **sample,
+                "objects": {
+                    "id": new_ids,
+                    "bbox": new_bboxes,
+                    "category": new_cats,
+                    "area": new_areas,
+                    "iscrowd": new_iscrowd,
+                },
+            }
+
+        return _apply
+
+    return DatasetDict({split: ds.map(_make_apply(split), with_indices=True) for split, ds in dataset.items()})
