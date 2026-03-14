@@ -32,7 +32,7 @@
 
 ## v2 Plan
 
-**Goal**: Push mAP from 0.39 → ~0.55–0.65 via better data quality, aggressive augmentation, and more training images.
+**Goal**: Push mAP from 0.39 → ~0.55–0.65 via better data quality, aggressive augmentation, synthetic data, and two-stage training.
 
 **Key insight**: Architecture is not the bottleneck. RT-DETR r18vd stays. Data is.
 
@@ -63,38 +63,55 @@
 ### Phase 3 — Synthetic Data Generator
 
 - [x] Create `src/moku/synthetic.py`:
-  - `generate_board_texture()`: Perlin/simplex noise tinted brown → wood grain
-  - `draw_grid()`: proportioned grid lines
-  - `draw_stone(pos, color)`: ellipse + specular highlight + drop shadow
-  - `apply_perspective()`: random homographic distortion
-  - `add_lighting()`: vignette + gradient overlay
-  - `crop_partial_board()`: simulate partial views (1–3 visible corners)
+  - Diverse backgrounds (7 wood palettes + 5 solid surfaces)
+  - 3D perspective transform (pitch/yaw/roll via pinhole camera model)
+  - Lighting simulation (brightness/contrast, color temperature, directional light, vignette)
+  - Stone position jitter (Gaussian offset from intersection center)
+  - Corner visibility guarantee (retry with reduced angles if corners leave bounds)
   - Output: (PIL image, COCO annotations) with perfect corner annotations
-- [ ] New `notebooks/05_Generate_Synthetic.ipynb`: preview + generate 500/100/100 + push HF
+- [ ] New `notebooks/05_Generate_Synthetic.ipynb`: preview + generate 1000/250/250 + push HF
 
-### Phase 4 — Pseudo-labeling on Real Scraped Images
+### Phase 4 — Dataset v2 Build
 
-- [ ] Create `src/moku/scraper.py`:
-  - Flickr API (search "go game goban baduk", CC license filter)
-  - Reddit r/baduk (public JSON API, top posts image URLs)
-- [ ] New `notebooks/06_Pseudolabel.ipynb`:
-  - Scrape ≥100 images from Flickr + Reddit
-  - Run v1 model → pseudo-annotations
-  - Open annotator for human review/correction
-  - Export corrected annotations to COCO format
-
-### Phase 5 — Dataset v2 Build
-
-- [ ] Update `src/moku/dataset.py`: add `build_dataset_v2()` combining v1 (fixed corners) + synthetic + pseudo-labeled
+- [ ] Update `src/moku/dataset.py`: add `build_dataset_v2()` combining v1 (fixed corners) + synthetic
 - [ ] Update `notebooks/01_Build_Dataset.ipynb` with v2 section
 - [ ] Push `kaya-go/moku-v2` to HF Hub
 
-### Phase 6 — Model v2 Training
+### Phase 5 — Model v2: Two-Stage Training
 
-- [ ] Update `notebooks/02_Train_Model.ipynb` to target `kaya-go/moku-v2`
-- [ ] HP tuning grid with new augmentation pipeline (same LR × WD grid)
+Training uses a **synthetic pre-train → real fine-tune** strategy:
+
+| | Stage 1: Pre-train | Stage 2: Fine-tune |
+|---|---|---|
+| **Data** | ~1500 synthetic images | ~320 real images (v1 dataset, fixed corners) |
+| **Purpose** | Learn general structure (grid, stones, corners) | Adapt to real-world domain (textures, camera noise) |
+| **Epochs** | ~30 | ~50 |
+| **Learning rate** | 1e-4 (standard) | 1e-5 to 5e-5 (low, to preserve learned features) |
+| **HP tuning** | None needed — just verify loss decreases | LR only: try 3 values (1e-5, 2e-5, 5e-5) |
+| **WD / batch size** | Same as v1 | Same as v1 |
+
+**Why two-stage over mixing?**
+Mixing synthetic + real data risks over-representing the synthetic domain (4:1 ratio). Two-stage training lets the model first learn the general structure, then cleanly adapt to the real domain. The literature (Domain Randomization, sim-to-real transfer) consistently shows two-stage outperforms naive mixing when the domain gap is significant.
+
+**HP tuning rationale**: Full grid search is unnecessary for v2. The critical HP is the stage 2 LR — too high destroys pre-trained features, too low under-fits the real domain. 3 runs is sufficient to find the sweet spot.
+
+- [ ] Update `notebooks/02_Train_Model.ipynb` with two-stage training sections
+- [ ] Stage 1: pre-train on synthetic dataset
+- [ ] Stage 2: fine-tune on real dataset with 3 LR candidates (1e-5, 2e-5, 5e-5)
 - [ ] Optional: compare RT-DETR r34vd backbone — 2× params, same ONNX pipeline
 - [ ] Push best model as `kaya-go/moku-v2` on HF Hub
+
+---
+
+## Future (post-v2)
+
+### Pseudo-labeling on Real Scraped Images
+
+*(Deferred from v2 — pursue after v2 model is established)*
+
+- Scrape real goban images from Flickr (CC license) + Reddit r/baduk
+- Run v2 model for pseudo-annotations → human review/correction
+- Add to dataset for v3
 
 ---
 
@@ -104,14 +121,12 @@
 |------|--------|
 | `src/moku/training.py` | Rewrite augmentation pipeline (albumentations) |
 | `src/moku/dataset.py` | Fix go-chess corners, add `build_dataset_v2()` |
-| `src/moku/synthetic.py` | **NEW** — synthetic goban generator |
-| `src/moku/scraper.py` | **NEW** — web image scraper (Flickr, Reddit) |
-| `tools/annotator/` | **NEW** — HTML/JS annotator app |
+| `src/moku/synthetic.py` | Synthetic goban generator (done) |
+| `tools/annotator/` | HTML/JS annotator app |
 | `notebooks/03_Evaluate.ipynb` | Per-class mAP table |
 | `notebooks/01_Build_Dataset.ipynb` | v2 section |
-| `notebooks/02_Train_Model.ipynb` | Point to `kaya-go/moku-v2` |
-| `notebooks/05_Generate_Synthetic.ipynb` | **NEW** |
-| `notebooks/06_Pseudolabel.ipynb` | **NEW** |
+| `notebooks/02_Train_Model.ipynb` | Two-stage training |
+| `notebooks/05_Generate_Synthetic.ipynb` | Synthetic data generation |
 
 ---
 
@@ -129,3 +144,7 @@
 | 2026-03-13 | HTML/JS annotator (not Gradio) | Zero extra deps, magnifier trivial in canvas, no persistent server needed |
 | 2026-03-13 | LLM image generation not prioritized | High cost, inconsistent quality for precise annotations; synthetic generator gives full control |
 | 2026-03-13 | Scrape from Flickr CC + Reddit r/baduk | Free, real-world variety; Sensei's Library + BGG as secondary sources |
+| 2026-03-14 | Enhanced synthetic generator: 3D perspective, diverse backgrounds, lighting, stone jitter | Bridges domain gap to real photos; improves corner detection robustness |
+| 2026-03-14 | Two-stage training (synthetic pre-train → real fine-tune) | Better than mixing when domain gap is significant; avoids synthetic over-representation |
+| 2026-03-14 | Defer pseudo-labeling to post-v2 | Focus v2 on synthetic + improved real data; pseudo-labeling adds complexity for uncertain gain at current model quality |
+| 2026-03-14 | Minimal HP tuning: LR sweep only (3 values) at stage 2 | Stage 1 HP insensitive; stage 2 LR is the only critical HP; 3 runs sufficient |
