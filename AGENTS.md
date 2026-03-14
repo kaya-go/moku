@@ -37,7 +37,8 @@ moku/
 │   ├── dataset.md             # Dataset details, sources, harmonization
 │   └── progress.md            # Current progress and next steps
 ├── notebooks/
-│   ├── 01_Build_Dataset.ipynb # Dataset creation and upload to HF
+│   ├── 01_Build_Dataset.ipynb # Dataset v1 creation and upload to HF
+│   ├── 01b_Build_Dataset_v2.ipynb # Dataset v2: corrected real + synthetic, upload to HF
 │   ├── 02_Train_Model.ipynb   # Model fine-tuning with HF Trainer
 │   ├── 03_Evaluate.ipynb      # Model evaluation, run comparison, HP tracking
 │   └── 04_Export_ONNX.ipynb   # ONNX export (future)
