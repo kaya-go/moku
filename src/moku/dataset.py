@@ -449,29 +449,47 @@ def audit_corners(dataset_or_dict, expected_count: int = 4) -> pd.DataFrame:
 def apply_corner_corrections(dataset: DatasetDict, corrections: dict) -> DatasetDict:
     """Apply human-corrected board_corner annotations to a DatasetDict.
 
-    Corrected boxes (from the Gradio annotator) replace the existing
+    Corrected boxes (from the annotator) replace the existing
     board_corner annotations for each image. Non-corner annotations are
     kept unchanged.
 
     Args:
         dataset: The original ``DatasetDict``.
-        corrections: Dict mapping ``"split__rowIdx"`` to
-            ``{"boxes": [{"id", "x", "y", "w", "h", "category"}, ...],
-              "split": str, "row_idx": int}``.
+        corrections: Dict mapping filename (``"{split}_{source}_{imageId}.jpg"``)
+            to ``{"boxes": [{"id", "x", "y", "w", "h", "category"}, ...]}``.
 
     Returns:
         A new ``DatasetDict`` with corrected corner annotations.
     """
     corner_cat = CATEGORIES["board_corner"]
 
-    # Build lookup: (split, row_idx) → correction entry
-    corr_lookup: dict[tuple[str, int], dict] = {}
-    for _key, val in corrections.items():
-        corr_lookup[(val["split"], val["row_idx"])] = val
+    # Build lookup: (split, source, image_id) → correction entry
+    corr_lookup: dict[tuple[str, str, str], dict] = {}
+    for fname, val in corrections.items():
+        # Parse filename: "{split}_{source}_{imageId}.jpg"
+        stem = fname.rsplit(".", 1)[0]  # drop .jpg
+        parts = stem.split("_", 1)  # split on first _ to get split name
+        if len(parts) < 2:
+            continue
+        # Split name may itself contain underscores (e.g. no, but be safe)
+        # Format is: {split}_{source}_{imageId}
+        # Split is always train/validation/test
+        for known_split in ("validation", "train", "test"):
+            if stem.startswith(known_split + "_"):
+                rest = stem[len(known_split) + 1 :]
+                # rest = "{source}_{imageId}" — imageId is the last segment
+                last_underscore = rest.rfind("_")
+                if last_underscore >= 0:
+                    source = rest[:last_underscore]
+                    image_id = rest[last_underscore + 1 :]
+                    corr_lookup[(known_split, source, image_id)] = val
+                break
 
     def _make_apply(split_name: str):
         def _apply(sample: dict, idx: int) -> dict:
-            corr = corr_lookup.get((split_name, idx))
+            source = sample.get("source_dataset", "unknown")
+            image_id = str(sample["image_id"])
+            corr = corr_lookup.get((split_name, source, image_id))
             if corr is None:
                 return sample
 

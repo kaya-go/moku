@@ -6,6 +6,8 @@ import json
 import random
 from pathlib import Path
 
+import albumentations as A
+import numpy as np
 import pandas as pd
 import torch
 from PIL import Image
@@ -81,16 +83,109 @@ def _flip_horizontal(image: Image.Image, annotations: list[dict]) -> tuple[Image
     return image, annotations
 
 
+# ---------------------------------------------------------------------------
+# Albumentations augmentation pipeline
+# ---------------------------------------------------------------------------
+
+
+def build_train_augmentation() -> A.Compose:
+    """Build the training augmentation pipeline with albumentations.
+
+    Returns an A.Compose that takes ``image`` (np.ndarray HWC uint8) and
+    ``bboxes`` (list of [x_min, y_min, w, h] in pixels) plus ``category_ids``.
+    Output bboxes remain in COCO format.
+    """
+    return A.Compose(
+        [
+            # Geometric
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.3),
+            A.Perspective(scale=(0.02, 0.08), p=0.5),
+            A.Rotate(limit=15, border_mode=0, p=0.5),
+            A.RandomResizedCrop(
+                size=(640, 640),
+                scale=(0.7, 1.0),
+                ratio=(0.8, 1.2),
+                p=0.3,
+            ),
+            # Photometric
+            A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.05, p=0.5),
+            A.RandomGamma(gamma_limit=(80, 120), p=0.3),
+            A.OneOf(
+                [
+                    A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                    A.MotionBlur(blur_limit=(3, 7), p=1.0),
+                ],
+                p=0.3,
+            ),
+            A.RandomShadow(
+                num_shadows_lower=1,
+                num_shadows_upper=2,
+                shadow_dimension=5,
+                shadow_roi=(0, 0, 1, 1),
+                p=0.2,
+            ),
+        ],
+        bbox_params=A.BboxParams(
+            format="coco",
+            label_fields=["category_ids"],
+            min_area=1.0,
+            min_visibility=0.3,
+        ),
+    )
+
+
+def _apply_augmentation(
+    image: Image.Image,
+    annotations: list[dict],
+    aug: A.Compose,
+) -> tuple[Image.Image, list[dict]]:
+    """Apply albumentations augmentation to image and COCO annotations.
+
+    Returns the augmented PIL image and updated annotations (bboxes that
+    get fully cropped out are removed).
+    """
+    img_np = np.array(image)
+    bboxes = [ann["bbox"] for ann in annotations]
+    category_ids = [ann["category_id"] for ann in annotations]
+
+    result = aug(image=img_np, bboxes=bboxes, category_ids=category_ids)
+
+    aug_image = Image.fromarray(result["image"])
+    aug_bboxes = result["bboxes"]
+    aug_cat_ids = result["category_ids"]
+
+    # Rebuild annotations keeping only surviving boxes
+    aug_annotations = []
+    for bbox, cat_id in zip(aug_bboxes, aug_cat_ids):
+        x, y, w, h = bbox
+        aug_annotations.append(
+            {
+                "id": 0,
+                "category_id": int(cat_id),
+                "bbox": [float(x), float(y), float(w), float(h)],
+                "area": float(w * h),
+                "iscrowd": 0,
+            }
+        )
+
+    return aug_image, aug_annotations
+
+
 def make_train_transform(image_processor: RTDetrImageProcessor, flip_p: float = 0.5):
-    """Create a per-example transform for training (with random horizontal flip)."""
+    """Create a per-example transform for training with albumentations augmentation.
+
+    The ``flip_p`` parameter is kept for API compatibility but is now ignored;
+    flip probability is controlled by the albumentations pipeline.
+    """
+    aug = build_train_augmentation()
 
     def transform(example: dict) -> dict:
         example = _unbatch_example(example)
         image = example["image"].convert("RGB")
         target = _build_coco_target(example)
 
-        if random.random() < flip_p:
-            image, target["annotations"] = _flip_horizontal(image, target["annotations"])
+        image, target["annotations"] = _apply_augmentation(image, target["annotations"], aug)
 
         return image_processor(images=[image], annotations=[target], return_tensors="pt")
 

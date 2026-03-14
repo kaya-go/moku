@@ -46,7 +46,7 @@ import mimetypes
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 TOOL_DIR = Path(__file__).parent
 
@@ -93,9 +93,9 @@ class _Handler(BaseHTTPRequestHandler):
     def _api_list_images(self):
         images = [dict(img) for img in _STATE["images_meta"]["images"]]
         for img in images:
-            iid = str(img["id"])
-            img["annotated"] = iid in _STATE["corrections"]
-            boxes = _STATE["corrections"].get(iid, {}).get("boxes", [])
+            fname = img["filename"]
+            img["annotated"] = fname in _STATE["corrections"]
+            boxes = _STATE["corrections"].get(fname, {}).get("boxes", [])
             img["corner_count"] = sum(1 for b in boxes if b.get("category") == 2)
         self._json({"images": images})
 
@@ -107,14 +107,16 @@ class _Handler(BaseHTTPRequestHandler):
         mime, _ = mimetypes.guess_type(filename)
         self._respond(img_path.read_bytes(), mime or "image/jpeg")
 
-    def _api_get_annotations(self, image_id: str):
-        ann = _STATE["corrections"].get(image_id) or _STATE["orig_annotations"].get(image_id, {"boxes": []})
+    def _api_get_annotations(self, raw_key: str):
+        key = unquote(raw_key)
+        ann = _STATE["corrections"].get(key) or _STATE["orig_annotations"].get(key, {"boxes": []})
         self._json(ann)
 
-    def _api_save_annotations(self, image_id: str):
+    def _api_save_annotations(self, raw_key: str):
+        key = unquote(raw_key)
         length = int(self.headers.get("Content-Length", 0))
         data = json.loads(self.rfile.read(length))
-        _STATE["corrections"][image_id] = data
+        _STATE["corrections"][key] = data
         output_file: Path = _STATE["output_file"]
         output_file.write_text(json.dumps(_STATE["corrections"], indent=2))
         self._json({"status": "ok"})

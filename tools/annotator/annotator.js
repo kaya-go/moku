@@ -149,7 +149,7 @@ async function loadImage(filteredPos) {
 
   document.getElementById('image-name').textContent = img.filename || '';
 
-  var annResp = await fetch('/api/annotations/' + img.id);
+  var annResp = await fetch('/api/annotations/' + encodeURIComponent(img.filename));
   var annData = await annResp.json();
   currentAnns = (annData.boxes || []).map(function(b) { return Object.assign({}, b); });
 
@@ -708,10 +708,10 @@ async function nextFiltered() {
 async function saveAnnotations() {
   var img = getCurrentImage();
   if (!img) return;
-  await fetch('/api/annotations/' + img.id, {
+  await fetch('/api/annotations/' + encodeURIComponent(img.filename), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ boxes: currentAnns, image_id: img.id, filename: img.filename }),
+    body: JSON.stringify({ boxes: currentAnns, filename: img.filename }),
   });
   _dirty = false;
   var gIdx = filteredIdx[currentFilteredPos];

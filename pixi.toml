@@ -35,6 +35,7 @@ gradio = ">=6.3.0"
 pycocotools = ">=2.0.11,<3"
 onnxscript = ">=0.5.6"
 pip = ">=26.0.1,<27"
+albumentations = ">=1.4.20,<3"
 
 [pypi-dependencies]
 moku = { path = ".", editable = true }

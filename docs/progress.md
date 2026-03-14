@@ -53,16 +53,16 @@
 
 ### Phase 2 — Aggressive Augmentation
 
-- [ ] `pixi add albumentations`
-- [ ] Rewrite transforms in `src/moku/training.py` using albumentations:
-  - **Geometric**: `Perspective` (most impactful for corners), `Rotate` (±15°), `HorizontalFlip`, `VerticalFlip`, `RandomCrop`
+- [x] `pixi add albumentations`
+- [x] Rewrite transforms in `src/moku/training.py` using albumentations:
+  - **Geometric**: `Perspective` (most impactful for corners), `Rotate` (±15°), `HorizontalFlip`, `VerticalFlip`, `RandomResizedCrop`
   - **Photometric**: `ColorJitter`, `RandomGamma`, `GaussianBlur`, `MotionBlur`, `RandomShadow`
-  - Adapt bbox conversion COCO ↔ albumentations format
+  - Bbox conversion handled natively by albumentations COCO format with min_area/min_visibility filtering
 - [ ] **Benchmark isolation run**: train on v1 dataset + new augmentation only to measure delta before adding new data
 
 ### Phase 3 — Synthetic Data Generator
 
-- [ ] Create `src/moku/synthetic.py`:
+- [x] Create `src/moku/synthetic.py`:
   - `generate_board_texture()`: Perlin/simplex noise tinted brown → wood grain
   - `draw_grid()`: proportioned grid lines
   - `draw_stone(pos, color)`: ellipse + specular highlight + drop shadow
