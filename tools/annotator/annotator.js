@@ -60,6 +60,7 @@ var isPanning    = false;
 var panStartX    = 0, panStartY = 0;
 var panOrigViewX = 0, panOrigViewY = 0;
 var spaceDown    = false;
+var lockedId     = null;  // corner locked to mouse cursor
 
 var mouseScreenX = 0, mouseScreenY = 0;
 var magEnabled   = true;
@@ -384,12 +385,36 @@ function onMouseDown(e) {
   if (e.button !== 0) return;
 
   var im = screenToImage(sx, sy);
+
+  // If a corner is locked, click releases it
+  if (lockedId !== null) {
+    lockedId = null;
+    markDirty();
+    render();
+    renderMagnifier();
+    renderAnnPanel();
+    return;
+  }
+
   dragStartX = sx;
   dragStartY = sy;
   hasDragged = false;
 
   var hit = boxAtImage(im.x, im.y);
   if (hit) {
+    // Click on a corner -> lock it to the mouse
+    if (hit.category === CAT_CORNER) {
+      selectedId = hit.id;
+      lockedId = hit.id;
+      // Snap center to mouse immediately
+      hit.x = im.x - hit.w / 2;
+      hit.y = im.y - hit.h / 2;
+      markDirty();
+      render();
+      renderMagnifier();
+      renderAnnPanel();
+      return;
+    }
     selectedId = hit.id;
     isDragging = true;
     dragOrigX  = hit.x;
@@ -423,6 +448,16 @@ function onMouseMove(e) {
     render();
     renderMagnifier();
     return;
+  }
+
+  // Locked corner follows mouse exactly
+  if (lockedId !== null) {
+    var lockedBox = currentAnns.find(function(b) { return b.id === lockedId; });
+    if (lockedBox) {
+      var imLock = screenToImage(coords.x, coords.y);
+      lockedBox.x = imLock.x - lockedBox.w / 2;
+      lockedBox.y = imLock.y - lockedBox.h / 2;
+    }
   }
 
   if (isDragging && selectedId !== null) {
@@ -485,6 +520,7 @@ function onMouseLeave() {
   document.getElementById('mag-wrap').style.display = 'none';
   isPanning = false;
   isDragging = false;
+  // Don't clear lockedId on leave — keep corner locked
 }
 
 function onRightClick(e) {
@@ -531,7 +567,9 @@ function onKeyDown(e) {
     case 'Delete': case 'Backspace': deleteSelected(); break;
     case 'ArrowRight': if (e.shiftKey) nextFiltered(); else nextImage(); break;
     case 'ArrowLeft':  if (e.shiftKey) prevFiltered(); else prevImage(); break;
-    case 'Escape': selectedId = null; render(); renderAnnPanel(); break;
+    case 'Escape':
+      if (lockedId !== null) { lockedId = null; }
+      selectedId = null; render(); renderAnnPanel(); break;
     case '1': setTool('corner'); break;
     case '2': setTool('black'); break;
     case '3': setTool('white'); break;
@@ -599,6 +637,7 @@ function addAnnotation(imgX, imgY) {
     category: cat,
   });
   selectedId = newId;
+  if (cat === CAT_CORNER) lockedId = newId;  // auto-lock new corners
   markDirty();
   render();
   renderMagnifier();
