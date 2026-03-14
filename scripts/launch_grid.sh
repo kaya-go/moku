@@ -12,7 +12,7 @@ set -euo pipefail
 
 export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
 
-FLAVOR="a10g-small"
+FLAVOR="a10g-large"
 STAGE="${1:-both}"
 
 # ── Stage 1: Synthetic pre-training ──────────────────────────────────────
@@ -28,7 +28,7 @@ launch_stage1() {
       --run-name "stage1_synthetic" \
       --lr 1e-4 \
       --num-epochs 30 \
-      --batch-size 4 \
+      --batch-size 16 \
       --push-to-hub
   echo "Stage 1 launched. Wait for completion before launching stage 2."
 }
@@ -47,11 +47,10 @@ launch_stage2() {
       --secrets HF_TOKEN \
       scripts/train.py \
         --stage 2 \
-        --resume-from "kaya-go/moku-v2-stage1" \
         --run-name "$run_name" \
         --lr "$lr" \
         --num-epochs 50 \
-        --batch-size 4
+        --batch-size 16
     sleep 10
   done
   echo "Stage 2 sweep launched."

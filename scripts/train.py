@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.12"
+# requires-python = "=3.12"
 # dependencies = [
 #     "torch",
 #     "torchvision",
@@ -25,10 +25,9 @@ Usage (HF Jobs, stage 1):
     hf jobs uv run --detach --flavor a10g-small --timeout 3h --secrets HF_TOKEN \\
         scripts/train.py --stage 1 --run-name v2_stage1 --num-epochs 30 --push-to-hub
 
-Usage (HF Jobs, stage 2 from stage 1 checkpoint):
+Usage (HF Jobs, stage 2 from stage 1 branch):
     hf jobs uv run --detach --flavor a10g-small --timeout 3h --secrets HF_TOKEN \\
-        scripts/train.py --stage 2 --resume-from kaya-go/moku-v2-stage1 \\
-        --run-name v2_stage2_lr2e-5 --lr 2e-5 --num-epochs 50
+        scripts/train.py --stage 2 --run-name v2_stage2_lr2e-5 --lr 2e-5 --num-epochs 50
 
 Resume interrupted training:
     uv run scripts/train.py --stage 1 --run-name v2_stage1 --resume
@@ -46,6 +45,7 @@ from transformers import (
     RTDetrForObjectDetection,
     RTDetrImageProcessor,
     Trainer,
+    TrainerCallback,
     TrainingArguments,
 )
 
@@ -54,12 +54,29 @@ from transformers import (
 # ---------------------------------------------------------------------------
 BASE_MODEL = "PekingU/rtdetr_r18vd"
 HF_DATASET = "kaya-go/moku-v2"
-HF_MODEL_STAGE1 = "kaya-go/moku-v2-stage1"
 HF_MODEL = "kaya-go/moku-v2"
+STAGE1_REVISION = "stage1"
 
 CATEGORIES = {"black_stone": 0, "white_stone": 1, "board_corner": 2}
 ID_TO_CATEGORY = {v: k for k, v in CATEGORIES.items()}
 NUM_LABELS = len(CATEGORIES)
+
+
+class HubPushCallback(TrainerCallback):
+    """Push model & processor to HF Hub (with revision) after each checkpoint save."""
+
+    def __init__(self, hub_model_id: str, revision: str, image_processor: RTDetrImageProcessor):
+        self.hub_model_id = hub_model_id
+        self.revision = revision
+        self.image_processor = image_processor
+
+    def on_save(self, args, state, control, **kwargs):
+        model = kwargs.get("model")
+        if model is None:
+            return
+        print(f"Pushing checkpoint (epoch {state.epoch:.0f}) to {self.hub_model_id} (revision={self.revision})...")
+        model.push_to_hub(self.hub_model_id, revision=self.revision)
+        self.image_processor.push_to_hub(self.hub_model_id, revision=self.revision)
 
 
 # ---------------------------------------------------------------------------
@@ -160,13 +177,19 @@ def main():
     if args.stage == 1:
         config_name = "synthetic"
         model_source = BASE_MODEL
-        hub_model_id = HF_MODEL_STAGE1
+        model_revision = None
+        hub_revision = STAGE1_REVISION
         default_lr = 1e-4
         default_epochs = 30
     else:
         config_name = "real"
-        model_source = args.resume_from or HF_MODEL_STAGE1
-        hub_model_id = HF_MODEL
+        if args.resume_from:
+            model_source = args.resume_from
+            model_revision = None
+        else:
+            model_source = HF_MODEL
+            model_revision = STAGE1_REVISION
+        hub_revision = "main"
         default_lr = 2e-5
         default_epochs = 50
 
@@ -176,7 +199,8 @@ def main():
 
     print(f"=== Stage {args.stage} Training ===")
     print(f"Dataset config: {config_name}")
-    print(f"Model source: {model_source}")
+    print(f"Model source: {model_source} (revision={model_revision})")
+    print(f"Hub target: {HF_MODEL} (revision={hub_revision})")
     print(f"LR: {lr}, Epochs: {num_epochs}")
 
     # --- Load dataset ---
@@ -185,9 +209,10 @@ def main():
     print(dataset)
 
     # --- Load model & image processor ---
-    print(f"\nLoading model: {model_source}")
+    print(f"\nLoading model: {model_source} (revision={model_revision})")
     image_processor = RTDetrImageProcessor.from_pretrained(
-        model_source if args.stage == 2 and args.resume_from else BASE_MODEL
+        model_source if args.stage == 2 else BASE_MODEL,
+        revision=model_revision,
     )
 
     if args.stage == 1:
@@ -203,6 +228,7 @@ def main():
         # Stage 2: load from stage 1 checkpoint (already has correct head)
         model = RTDetrForObjectDetection.from_pretrained(
             model_source,
+            revision=model_revision,
             num_labels=NUM_LABELS,
             id2label=ID_TO_CATEGORY,
             label2id=CATEGORIES,
@@ -240,20 +266,23 @@ def main():
         dataloader_num_workers=0,
         fp16=torch.cuda.is_available() and not args.use_cpu,
         use_cpu=args.use_cpu,
-        push_to_hub=args.push_to_hub,
-        hub_model_id=hub_model_id if args.push_to_hub else None,
+        push_to_hub=False,
         report_to=report_to,
         trackio_space_id="kaya-go/moku-training" if report_to == "trackio" else None,
         run_name=args.run_name,
     )
 
-    # --- Train ---
+    callbacks = []
+    if args.push_to_hub:
+        callbacks.append(HubPushCallback(HF_MODEL, hub_revision, image_processor))
+
     trainer = Trainer(
         model=model,
         args=training_args,
         data_collator=collate_fn,
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
+        callbacks=callbacks,
     )
 
     print("Starting training...")
@@ -263,12 +292,12 @@ def main():
         trainer.train()
     print("Training complete.")
 
-    # --- Push to Hub ---
+    # --- Final push to Hub (best model) ---
     if args.push_to_hub:
-        print(f"Pushing model to {hub_model_id}...")
-        trainer.model.push_to_hub(hub_model_id)
-        image_processor.push_to_hub(hub_model_id)
-        print(f"Model pushed to https://huggingface.co/{hub_model_id}")
+        print(f"Pushing best model to {HF_MODEL} (revision={hub_revision})...")
+        trainer.model.push_to_hub(HF_MODEL, revision=hub_revision)
+        image_processor.push_to_hub(HF_MODEL, revision=hub_revision)
+        print(f"Model pushed to https://huggingface.co/{HF_MODEL} (branch: {hub_revision})")
 
 
 if __name__ == "__main__":
