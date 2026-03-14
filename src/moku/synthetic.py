@@ -384,8 +384,9 @@ def generate_synthetic_sample(
 
     # 3. Place stones on random intersections
     if n_stones is None:
-        max_stones = int(board_size * board_size * 0.4)
-        n_stones = random.randint(5, max(6, max_stones))
+        max_stones = int(board_size * board_size * 0.8)
+        frac = random.betavariate(2.0, 1.2)
+        n_stones = max(3, int(frac * max_stones))
 
     all_positions = [(r, c) for r in range(board_size) for c in range(board_size)]
     random.shuffle(all_positions)
