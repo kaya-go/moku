@@ -63,18 +63,32 @@ NUM_LABELS = len(CATEGORIES)
 
 
 class HubPushCallback(TrainerCallback):
-    """Push model & processor to HF Hub (with revision) after each checkpoint save."""
+    """Push model & processor to HF Hub (with revision) periodically during training.
 
-    def __init__(self, hub_model_id: str, revision: str, image_processor: RTDetrImageProcessor):
+    Only pushes every ``push_every_n_epochs`` saves to avoid hitting the
+    HF Hub rate limit (128 commits/hour).  Defaults to every 10 epochs.
+    """
+
+    def __init__(
+        self,
+        hub_model_id: str,
+        revision: str,
+        image_processor: RTDetrImageProcessor,
+        push_every_n_epochs: int = 5,
+    ):
         self.hub_model_id = hub_model_id
         self.revision = revision
         self.image_processor = image_processor
+        self.push_every_n_epochs = push_every_n_epochs
 
     def on_save(self, args, state, control, **kwargs):
         model = kwargs.get("model")
         if model is None:
             return
-        print(f"Pushing checkpoint (epoch {state.epoch:.0f}) to {self.hub_model_id} (revision={self.revision})...")
+        epoch = int(state.epoch)
+        if epoch % self.push_every_n_epochs != 0:
+            return
+        print(f"Pushing checkpoint (epoch {epoch}) to {self.hub_model_id} (revision={self.revision})...")
         model.push_to_hub(self.hub_model_id, revision=self.revision)
         self.image_processor.push_to_hub(self.hub_model_id, revision=self.revision)
 
@@ -166,6 +180,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr-scheduler", default="cosine", choices=["cosine", "linear", "constant"])
     p.add_argument("--use-cpu", action="store_true", help="Force CPU (for local testing)")
     p.add_argument("--push-to-hub", action="store_true", help="Push model to HF Hub after training")
+    p.add_argument(
+        "--hub-revision",
+        type=str,
+        default=None,
+        help="HF Hub branch to push to (default: stage1 for stage 1, main for stage 2)",
+    )
     p.add_argument("--no-trackio", action="store_true", help="Disable Trackio logging")
     return p.parse_args()
 
@@ -178,7 +198,7 @@ def main():
         config_name = "synthetic"
         model_source = BASE_MODEL
         model_revision = None
-        hub_revision = STAGE1_REVISION
+        hub_revision = args.hub_revision or STAGE1_REVISION
         default_lr = 1e-4
         default_epochs = 30
     else:
@@ -189,7 +209,7 @@ def main():
         else:
             model_source = HF_MODEL
             model_revision = STAGE1_REVISION
-        hub_revision = "main"
+        hub_revision = args.hub_revision or "main"
         default_lr = 2e-5
         default_epochs = 50
 

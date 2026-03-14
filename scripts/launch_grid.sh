@@ -39,7 +39,8 @@ launch_stage2() {
   LRS=(1e-5 2e-5 5e-5)
   for lr in "${LRS[@]}"; do
     run_name="stage2_lr${lr}"
-    echo "  Launching: ${run_name}"
+    hub_rev="stage2-lr${lr}"
+    echo "  Launching: ${run_name} → branch ${hub_rev}"
     hf jobs uv run \
       --detach \
       --flavor "$FLAVOR" \
@@ -50,8 +51,10 @@ launch_stage2() {
         --run-name "$run_name" \
         --lr "$lr" \
         --num-epochs 50 \
-        --batch-size 16
-    sleep 10
+        --batch-size 16 \
+        --push-to-hub \
+        --hub-revision "$hub_rev"
+    sleep 3
   done
   echo "Stage 2 sweep launched."
 }

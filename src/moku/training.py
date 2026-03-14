@@ -321,6 +321,171 @@ def format_map_per_class(metrics: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+@torch.no_grad()
+def evaluate_center_distance(
+    model: RTDetrForObjectDetection,
+    dataset,
+    image_processor: RTDetrImageProcessor,
+    batch_size: int = 8,
+    threshold: float = 0.3,
+    distance_thresholds: list[float] | None = None,
+    device: str | None = None,
+) -> dict:
+    """Evaluate detections using center-point distance instead of IoU.
+
+    For each image and class, predictions are matched to ground truth using
+    greedy nearest-center matching. A match is "correct" if the Euclidean
+    distance between predicted and GT bbox centers is below a threshold
+    (expressed as a fraction of the image diagonal).
+
+    Args:
+        distance_thresholds: Fractions of image diagonal to use as matching
+            thresholds.  Defaults to [0.01, 0.02, 0.05] (1%, 2%, 5%).
+
+    Returns a dict with:
+        - per_class: dict[class_name] -> {precision, recall, f1, mean_dist, median_dist}
+            at each distance threshold
+        - overall: aggregated across classes
+        - all_distances: list of all matched center distances (in pixels)
+    """
+    from scipy.optimize import linear_sum_assignment
+
+    if distance_thresholds is None:
+        distance_thresholds = [0.01, 0.02, 0.05]
+
+    if device is None:
+        if torch.backends.mps.is_available():
+            device = "mps"
+        elif torch.cuda.is_available():
+            device = "cuda"
+        else:
+            device = "cpu"
+
+    model = model.to(device)
+    model.eval()
+
+    # Collect all per-image, per-class matched distances
+    # Structure: class_id -> list of (gt_center, pred_center, distance, img_diag)
+    all_matches: dict[int, list[tuple[float, float]]] = {i: [] for i in ID_TO_CATEGORY}
+    # Track unmatched GT and preds per class
+    unmatched_gt: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
+    unmatched_pred: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
+
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
+
+    for batch in dataloader:
+        pixel_values = batch["pixel_values"].to(device)
+        labels = batch["labels"]
+
+        outputs = model(pixel_values=pixel_values)
+
+        orig_sizes = torch.stack([lab["orig_size"] for lab in labels]).to(device)
+        results = image_processor.post_process_object_detection(outputs, target_sizes=orig_sizes, threshold=threshold)
+
+        for i, (res, lab) in enumerate(zip(results, labels)):
+            orig_h, orig_w = lab["orig_size"]
+            img_diag = float((orig_h**2 + orig_w**2) ** 0.5)
+
+            # Predicted boxes (xyxy) -> centers
+            pred_boxes = res["boxes"].cpu()
+            pred_labels = res["labels"].cpu()
+
+            # GT boxes (normalized cxcywh) -> absolute centers
+            boxes_cxcywh = lab["boxes"]
+            gt_cx = boxes_cxcywh[:, 0] * orig_w
+            gt_cy = boxes_cxcywh[:, 1] * orig_h
+            gt_labels = lab["class_labels"].cpu()
+
+            # Match per class
+            for cls_id in ID_TO_CATEGORY:
+                gt_mask = gt_labels == cls_id
+                pred_mask = pred_labels == cls_id
+
+                gt_centers = (
+                    torch.stack([gt_cx[gt_mask], gt_cy[gt_mask]], dim=-1) if gt_mask.any() else torch.zeros(0, 2)
+                )
+                pred_centers_xyxy = pred_boxes[pred_mask]
+                if pred_centers_xyxy.numel() > 0:
+                    pred_cx = (pred_centers_xyxy[:, 0] + pred_centers_xyxy[:, 2]) / 2
+                    pred_cy = (pred_centers_xyxy[:, 1] + pred_centers_xyxy[:, 3]) / 2
+                    p_centers = torch.stack([pred_cx, pred_cy], dim=-1)
+                else:
+                    p_centers = torch.zeros(0, 2)
+
+                n_gt = gt_centers.shape[0]
+                n_pred = p_centers.shape[0]
+
+                if n_gt == 0:
+                    unmatched_pred[cls_id] += n_pred
+                    continue
+                if n_pred == 0:
+                    unmatched_gt[cls_id] += n_gt
+                    continue
+
+                # Cost matrix: Euclidean distance between all pairs
+                cost = torch.cdist(gt_centers.float(), p_centers.float())  # (n_gt, n_pred)
+                gt_idx, pred_idx = linear_sum_assignment(cost.numpy())
+
+                matched = 0
+                for gi, pi in zip(gt_idx, pred_idx):
+                    dist = float(cost[gi, pi])
+                    all_matches[cls_id].append((dist, img_diag))
+                    matched += 1
+
+                unmatched_gt[cls_id] += n_gt - matched
+                unmatched_pred[cls_id] += n_pred - matched
+
+    # Compute metrics at each distance threshold
+    per_class: dict[str, dict] = {}
+    for cls_id, name in ID_TO_CATEGORY.items():
+        matches = all_matches[cls_id]
+        dists_px = [d for d, _ in matches]
+        per_threshold = {}
+        for dt in distance_thresholds:
+            tp = sum(1 for d, diag in matches if d / diag <= dt)
+            fn = sum(1 for d, diag in matches if d / diag > dt) + unmatched_gt[cls_id]
+            fp = sum(1 for d, diag in matches if d / diag > dt) + unmatched_pred[cls_id]
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            per_threshold[f"{dt:.0%}"] = {
+                "precision": round(precision, 4),
+                "recall": round(recall, 4),
+                "f1": round(f1, 4),
+                "tp": tp,
+            }
+        per_class[name] = {
+            "thresholds": per_threshold,
+            "mean_dist_px": round(float(np.mean(dists_px)), 2) if dists_px else None,
+            "median_dist_px": round(float(np.median(dists_px)), 2) if dists_px else None,
+            "n_gt": len(matches) + unmatched_gt[cls_id],
+            "n_pred": len(matches) + unmatched_pred[cls_id],
+            "n_matched": len(matches),
+        }
+
+    return {"per_class": per_class, "distance_thresholds": distance_thresholds}
+
+
+def format_center_distance_results(metrics: dict) -> pd.DataFrame:
+    """Format center-distance evaluation results as a DataFrame."""
+    rows = []
+    for name, data in metrics["per_class"].items():
+        row: dict = {
+            "category": name,
+            "n_gt": data["n_gt"],
+            "n_pred": data["n_pred"],
+            "matched": data["n_matched"],
+            "mean_dist_px": data["mean_dist_px"],
+            "median_dist_px": data["median_dist_px"],
+        }
+        for dt_label, dt_metrics in data["thresholds"].items():
+            row[f"P@{dt_label}"] = dt_metrics["precision"]
+            row[f"R@{dt_label}"] = dt_metrics["recall"]
+            row[f"F1@{dt_label}"] = dt_metrics["f1"]
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def load_training_runs(runs_dir: str | Path) -> pd.DataFrame:
     """Load trainer log history from all runs in a directory.
 
