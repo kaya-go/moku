@@ -90,8 +90,8 @@ Training follows a **synthetic pre-train → real fine-tune** approach:
 1. **Stage 1 — Synthetic pre-training** (~1500 synthetic images, ~30 epochs, LR=1e-4):
    The model starts from COCO-pretrained weights and learns the general structure of Go boards: grid layout, stone shapes, and corner positions. Synthetic data provides perfect annotations and unlimited diversity (backgrounds, perspectives, lighting).
 
-2. **Stage 2 — Real fine-tuning** (~320 real images, ~50 epochs, LR=1e-5 to 5e-5):
-   The model adapts to the real-world domain: camera noise, natural lighting, real wood textures, etc. A lower learning rate preserves features learned in stage 1 while adapting to the distribution shift.
+2. **Stage 2 — Real fine-tuning** (~320 real images, ~500 epochs, LR=2e-4 to 1e-3):
+   The model adapts to the real-world domain: camera noise, natural lighting, real wood textures, etc. Multiple LR sweep runs have been performed to find the right balance between preserving stage 1 features and adapting to the real domain.
 
 **Why not mix synthetic + real?** With a ~5:1 synthetic-to-real ratio, naive mixing risks the model over-fitting to synthetic appearance. Two-stage training cleanly separates domain learning from domain adaptation, which consistently outperforms mixing in sim-to-real transfer literature.
 

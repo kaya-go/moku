@@ -85,19 +85,24 @@ Training uses a **synthetic pre-train → real fine-tune** strategy:
 |---|---|---|
 | **Data** | ~1500 synthetic images | ~320 real images (v1 dataset, fixed corners) |
 | **Purpose** | Learn general structure (grid, stones, corners) | Adapt to real-world domain (textures, camera noise) |
-| **Epochs** | ~30 | ~50 |
-| **Learning rate** | 1e-4 (standard) | 1e-5 to 5e-5 (low, to preserve learned features) |
-| **HP tuning** | None needed — just verify loss decreases | LR only: try 3 values (1e-5, 2e-5, 5e-5) |
+| **Epochs** | ~30 | ~500 |
+| **Learning rate** | 1e-4 (standard) | Sweep: 2e-4, 5e-4, 1e-3 (run 3) |
+| **HP tuning** | None needed — just verify loss decreases | LR sweep across 3 values |
 | **WD / batch size** | Same as v1 | Same as v1 |
 
 **Why two-stage over mixing?**
 Mixing synthetic + real data risks over-representing the synthetic domain (4:1 ratio). Two-stage training lets the model first learn the general structure, then cleanly adapt to the real domain. The literature (Domain Randomization, sim-to-real transfer) consistently shows two-stage outperforms naive mixing when the domain gap is significant.
 
-**HP tuning rationale**: Full grid search is unnecessary for v2. The critical HP is the stage 2 LR — too high destroys pre-trained features, too low under-fits the real domain. 3 runs is sufficient to find the sweet spot.
+**HP tuning rationale**: Full grid search is unnecessary for v2. The critical HP is the stage 2 LR — too high destroys pre-trained features, too low under-fits the real domain. 3 runs per sweep is sufficient to find the sweet spot.
 
-- [ ] Update `notebooks/02_Train_Model.ipynb` with two-stage training sections
-- [ ] Stage 1: pre-train on synthetic dataset
-- [ ] Stage 2: fine-tune on real dataset with 3 LR candidates (1e-5, 2e-5, 5e-5)
+**Training runs history**:
+- Run 1: LR sweep 1e-5, 2e-5, 5e-5 (50 epochs) — under-fit, mAP well below v1
+- Run 2: LR sweep 5e-5, 8e-5, 1e-4, 2e-4 (50 epochs) — still below v1 mAP
+- Run 3 (current): LR sweep 2e-4, 5e-4, 1e-3 (500 epochs) — trying higher LRs and longer training
+
+- [x] Update `notebooks/02_Train_Model.ipynb` with two-stage training sections
+- [x] Stage 1: pre-train on synthetic dataset
+- [ ] Stage 2: fine-tune on real dataset — run 3 with LR sweep (2e-4, 5e-4, 1e-3)
 - [ ] Optional: compare RT-DETR r34vd backbone — 2× params, same ONNX pipeline
 - [ ] Push best model as `kaya-go/moku-v2` on HF Hub
 
@@ -148,3 +153,5 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 | 2026-03-14 | Two-stage training (synthetic pre-train → real fine-tune) | Better than mixing when domain gap is significant; avoids synthetic over-representation |
 | 2026-03-14 | Defer pseudo-labeling to post-v2 | Focus v2 on synthetic + improved real data; pseudo-labeling adds complexity for uncertain gain at current model quality |
 | 2026-03-14 | Minimal HP tuning: LR sweep only (3 values) at stage 2 | Stage 1 HP insensitive; stage 2 LR is the only critical HP; 3 runs sufficient |
+| 2026-03-14 | Run 1–2 LR sweeps under-performed v1 mAP (0.39) | Low LRs (1e-5 to 2e-4) and short training (50 epochs) insufficient |
+| 2026-03-14 | Run 3: higher LRs (2e-4, 5e-4, 1e-3) + 500 epochs | Trying stronger fine-tuning signal and longer training to recover v1 mAP |
