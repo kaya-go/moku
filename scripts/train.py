@@ -12,19 +12,26 @@
 #     "huggingface_hub>=1.5.0",
 # ]
 # ///
-"""Fine-tune RT-DETR r18vd on kaya-go/moku-v1 dataset.
+"""Fine-tune RT-DETR r18vd on kaya-go/moku-v2 dataset.
 
-Self-contained training script for HF Jobs.
+Self-contained training script for HF Jobs. Supports two-stage training:
+  - Stage 1: Pre-train on synthetic data (--stage 1)
+  - Stage 2: Fine-tune on real data from a stage 1 checkpoint (--stage 2 --resume-from <model>)
 
-Usage (local CPU test):
-    uv run scripts/train.py --num-epochs 2 --use-cpu
+Usage (local CPU test, stage 1):
+    uv run scripts/train.py --stage 1 --num-epochs 2 --use-cpu
 
-Usage (HF Jobs with GPU):
-    hf jobs uv run \
-        --flavor a10g-small \
-        --timeout 3h \
-        --secrets HF_TOKEN \
-        scripts/train.py
+Usage (HF Jobs, stage 1):
+    hf jobs uv run --detach --flavor a10g-small --timeout 3h --secrets HF_TOKEN \\
+        scripts/train.py --stage 1 --run-name v2_stage1 --num-epochs 30 --push-to-hub
+
+Usage (HF Jobs, stage 2 from stage 1 checkpoint):
+    hf jobs uv run --detach --flavor a10g-small --timeout 3h --secrets HF_TOKEN \\
+        scripts/train.py --stage 2 --resume-from kaya-go/moku-v2-stage1 \\
+        --run-name v2_stage2_lr2e-5 --lr 2e-5 --num-epochs 50
+
+Resume interrupted training:
+    uv run scripts/train.py --stage 1 --run-name v2_stage1 --resume
 """
 
 from __future__ import annotations
@@ -46,8 +53,9 @@ from transformers import (
 # Constants
 # ---------------------------------------------------------------------------
 BASE_MODEL = "PekingU/rtdetr_r18vd"
-HF_DATASET = "kaya-go/moku-v1"
-HF_MODEL = "kaya-go/moku-v1"
+HF_DATASET = "kaya-go/moku-v2"
+HF_MODEL_STAGE1 = "kaya-go/moku-v2-stage1"
+HF_MODEL = "kaya-go/moku-v2"
 
 CATEGORIES = {"black_stone": 0, "white_stone": 1, "board_corner": 2}
 ID_TO_CATEGORY = {v: k for k, v in CATEGORIES.items()}
@@ -127,7 +135,10 @@ def collate_fn(batch: list[dict]) -> dict:
 # Main
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Fine-tune RT-DETR on moku dataset")
+    p = argparse.ArgumentParser(description="Fine-tune RT-DETR on moku dataset (two-stage)")
+    p.add_argument("--stage", type=int, choices=[1, 2], default=1, help="Training stage: 1=synthetic, 2=real")
+    p.add_argument("--resume-from", type=str, default=None, help="HF model ID or local path to resume from (stage 2)")
+    p.add_argument("--resume", action="store_true", help="Resume interrupted training from last checkpoint")
     p.add_argument("--run-name", default="baseline", help="Name of the training run")
     p.add_argument("--num-epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=4)
@@ -145,21 +156,57 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
 
+    # --- Determine dataset config and model source ---
+    if args.stage == 1:
+        config_name = "synthetic"
+        model_source = BASE_MODEL
+        hub_model_id = HF_MODEL_STAGE1
+        default_lr = 1e-4
+        default_epochs = 30
+    else:
+        config_name = "real"
+        model_source = args.resume_from or HF_MODEL_STAGE1
+        hub_model_id = HF_MODEL
+        default_lr = 2e-5
+        default_epochs = 50
+
+    # Use provided values or stage-specific defaults
+    lr = args.lr if args.lr != 1e-4 or args.stage == 1 else default_lr
+    num_epochs = args.num_epochs if args.num_epochs != 50 or args.stage == 2 else default_epochs
+
+    print(f"=== Stage {args.stage} Training ===")
+    print(f"Dataset config: {config_name}")
+    print(f"Model source: {model_source}")
+    print(f"LR: {lr}, Epochs: {num_epochs}")
+
     # --- Load dataset ---
-    print(f"Loading dataset: {HF_DATASET}")
-    dataset = load_dataset(HF_DATASET)
+    print(f"\nLoading dataset: {HF_DATASET} ({config_name})")
+    dataset = load_dataset(HF_DATASET, config_name)
     print(dataset)
 
     # --- Load model & image processor ---
-    print(f"Loading model: {BASE_MODEL}")
-    image_processor = RTDetrImageProcessor.from_pretrained(BASE_MODEL)
-    model = RTDetrForObjectDetection.from_pretrained(
-        BASE_MODEL,
-        num_labels=NUM_LABELS,
-        id2label=ID_TO_CATEGORY,
-        label2id=CATEGORIES,
-        ignore_mismatched_sizes=True,
+    print(f"\nLoading model: {model_source}")
+    image_processor = RTDetrImageProcessor.from_pretrained(
+        model_source if args.stage == 2 and args.resume_from else BASE_MODEL
     )
+
+    if args.stage == 1:
+        # Stage 1: fresh model from COCO pretrained
+        model = RTDetrForObjectDetection.from_pretrained(
+            model_source,
+            num_labels=NUM_LABELS,
+            id2label=ID_TO_CATEGORY,
+            label2id=CATEGORIES,
+            ignore_mismatched_sizes=True,
+        )
+    else:
+        # Stage 2: load from stage 1 checkpoint (already has correct head)
+        model = RTDetrForObjectDetection.from_pretrained(
+            model_source,
+            num_labels=NUM_LABELS,
+            id2label=ID_TO_CATEGORY,
+            label2id=CATEGORIES,
+        )
 
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -168,7 +215,6 @@ def main():
     # --- Apply transforms ---
     dataset["train"].set_transform(make_train_transform(image_processor))
     dataset["validation"].set_transform(make_eval_transform(image_processor))
-    dataset["test"].set_transform(make_eval_transform(image_processor))
 
     # --- Training arguments ---
     report_to = "none" if args.no_trackio else "trackio"
@@ -176,10 +222,10 @@ def main():
     training_args = TrainingArguments(
         project="moku",
         output_dir=f"runs/{args.run_name}",
-        num_train_epochs=args.num_epochs,
+        num_train_epochs=num_epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.eval_batch_size,
-        learning_rate=args.lr,
+        learning_rate=lr,
         weight_decay=args.weight_decay,
         lr_scheduler_type=args.lr_scheduler,
         warmup_ratio=args.warmup_ratio,
@@ -195,7 +241,7 @@ def main():
         fp16=torch.cuda.is_available() and not args.use_cpu,
         use_cpu=args.use_cpu,
         push_to_hub=args.push_to_hub,
-        hub_model_id=HF_MODEL if args.push_to_hub else None,
+        hub_model_id=hub_model_id if args.push_to_hub else None,
         report_to=report_to,
         trackio_space_id="kaya-go/moku-training" if report_to == "trackio" else None,
         run_name=args.run_name,
@@ -211,15 +257,18 @@ def main():
     )
 
     print("Starting training...")
-    trainer.train()
+    if args.resume:
+        trainer.train(resume_from_checkpoint=True)
+    else:
+        trainer.train()
     print("Training complete.")
 
     # --- Push to Hub ---
     if args.push_to_hub:
-        print(f"Pushing model to {HF_MODEL}...")
-        trainer.model.push_to_hub(HF_MODEL)
-        image_processor.push_to_hub(HF_MODEL)
-        print(f"Model pushed to https://huggingface.co/{HF_MODEL}")
+        print(f"Pushing model to {hub_model_id}...")
+        trainer.model.push_to_hub(hub_model_id)
+        image_processor.push_to_hub(hub_model_id)
+        print(f"Model pushed to https://huggingface.co/{hub_model_id}")
 
 
 if __name__ == "__main__":
