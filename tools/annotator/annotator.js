@@ -1,199 +1,321 @@
 /**
- * Moku Corner Annotator — annotation logic
+ * Moku Annotator - full annotation tool for corners, black & white stones.
+ *
+ * Features:
+ *   - Pan & zoom (scroll wheel, Space+drag)
+ *   - Magnifier that follows the mouse
+ *   - Drag & drop any annotation
+ *   - Tool modes: corner, black stone, white stone, move
+ *   - Sidebar filtering: all / flagged / corrected / not corrected
+ *   - Keyboard shortcuts
  *
  * Annotations format (per image):
  *   { boxes: [{id, x, y, w, h, category}] }
  *
- * category codes: 0=black_stone, 1=white_stone, 2=board_corner
- *
- * Keyboard shortcuts:
- *   Click empty space  → add board_corner bbox (max 4)
- *   Click on bbox      → select
- *   Drag selected      → move
- *   Right-click bbox   → delete
- *   Del / Backspace    → delete selected
- *   S / Ctrl+S         → save
- *   N / ArrowRight     → next image
- *   P / ArrowLeft      → prev image
- *   Escape             → deselect
+ * Categories: 0=black_stone, 1=white_stone, 2=board_corner
  */
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const CORNER_CAT   = 2;
-const MAX_CORNERS  = 4;
-const CORNER_SIZE  = 20;   // default new-bbox side length in image pixels
-const MAG_SIZE     = 180;  // magnifier canvas width/height
-const MAG_ZOOM     = 4;    // magnifier zoom factor
-const DRAG_THRESH  = 4;    // pixels before a mousedown is treated as a drag
+var CAT_BLACK    = 0;
+var CAT_WHITE    = 1;
+var CAT_CORNER   = 2;
+var MAX_CORNERS  = 4;
+var CORNER_SIZE  = 20;
+var STONE_SIZE   = 20;
+var MAG_SIZE     = 200;
+var MAG_ZOOM     = 5;
+var DRAG_THRESH  = 3;
+var HIT_PADDING  = 6;
 
-const CAT_COLORS = {
-  0: '#e7298a',  // black_stone — magenta
-  1: '#1b9e77',  // white_stone — teal
-  2: '#d95f02',  // board_corner — orange
+var CAT_COLORS = {
+  0: '#ec4899',
+  1: '#14b8a6',
+  2: '#f97316',
 };
-const CAT_NAMES = { 0: 'black_stone', 1: 'white_stone', 2: 'board_corner' };
+var CAT_NAMES = { 0: 'black', 1: 'white', 2: 'corner' };
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
-let images = [];          // [{id, filename, source, flagged, flag_reason, ...}]
-let currentIdx  = 0;
-let currentAnns = [];     // [{id, x, y, w, h, category}] — image-pixel coords
-let selectedId  = null;
+var allImages   = [];
+var filteredIdx = [];
+var currentFilteredPos = -1;
+var currentAnns = [];
+var selectedId  = null;
+var activeTool  = 'corner';
 
-let isDragging   = false;
-let hasDragged   = false;
-let dragStartX   = 0, dragStartY = 0;
-let dragOrigX    = 0, dragOrigY  = 0;
+var viewX = 0, viewY = 0;
+var zoom  = 1.0;
+var baseScale = 1.0;
 
-let scale   = 1.0;        // canvas px → image px factor
-let mouseX  = 0, mouseY  = 0;  // canvas coords
+var isDragging   = false;
+var hasDragged   = false;
+var dragStartX   = 0, dragStartY = 0;
+var dragOrigX    = 0, dragOrigY  = 0;
+var isPanning    = false;
+var panStartX    = 0, panStartY = 0;
+var panOrigViewX = 0, panOrigViewY = 0;
+var spaceDown    = false;
 
-let canvas, ctx, magCanvas, magCtx, currentImg;
+var mouseScreenX = 0, mouseScreenY = 0;
+var magEnabled   = true;
+
+var canvas, ctx, magCanvas, magCtx, currentImg;
+var canvasWrap;
 
 // ---------------------------------------------------------------------------
-// Initialisation
+// Init
 // ---------------------------------------------------------------------------
 
-window.onload = () => {
-  canvas    = document.getElementById('main-canvas');
-  ctx       = canvas.getContext('2d');
-  magCanvas = document.getElementById('mag-canvas');
-  magCtx    = magCanvas.getContext('2d');
+window.onload = function() {
+  canvas     = document.getElementById('main-canvas');
+  ctx        = canvas.getContext('2d');
+  magCanvas  = document.getElementById('mag-canvas');
+  magCtx     = magCanvas.getContext('2d');
+  canvasWrap = document.getElementById('canvas-wrap');
 
-  canvas.addEventListener('mousedown',    onMouseDown);
-  canvas.addEventListener('mousemove',    onMouseMove);
-  canvas.addEventListener('mouseup',      onMouseUp);
-  canvas.addEventListener('contextmenu',  onRightClick);
-  document.addEventListener('keydown',    onKeyDown);
+  canvas.addEventListener('mousedown',   onMouseDown);
+  canvas.addEventListener('mousemove',   onMouseMove);
+  canvas.addEventListener('mouseup',     onMouseUp);
+  canvas.addEventListener('mouseleave',  onMouseLeave);
+  canvas.addEventListener('contextmenu', onRightClick);
+  canvasWrap.addEventListener('wheel',   onWheel, { passive: false });
+
+  document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('keyup',   onKeyUp);
+
+  canvasWrap.addEventListener('contextmenu', function(e) { e.preventDefault(); });
 
   loadImageList();
 };
 
 // ---------------------------------------------------------------------------
-// Data loading
+// Data
 // ---------------------------------------------------------------------------
 
 async function loadImageList() {
-  const resp = await fetch('/api/images');
-  const data = await resp.json();
-  images = data.images || [];
-  renderSidebar();
-  if (images.length > 0) loadImage(0);
+  var resp = await fetch('/api/images');
+  var data = await resp.json();
+  allImages = data.images || [];
+  applyFilter();
+  if (filteredIdx.length > 0) loadImage(0);
 }
 
-async function loadImage(idx) {
-  if (idx < 0 || idx >= images.length) return;
-  currentIdx = idx;
-  selectedId = null;
+function applyFilter() {
+  var filterVal = document.getElementById('filter-select').value;
+  var searchVal = document.getElementById('sidebar-search').value.toLowerCase().trim();
 
-  const img = images[idx];
+  filteredIdx = [];
+  for (var i = 0; i < allImages.length; i++) {
+    var img = allImages[i];
+    if (filterVal === 'flagged' && !img.flagged) continue;
+    if (filterVal === 'corrected' && !img.annotated) continue;
+    if (filterVal === 'not-corrected' && img.annotated) continue;
+    if (filterVal === 'flagged-not-corrected' && (!img.flagged || img.annotated)) continue;
+    if (searchVal) {
+      var haystack = (img.filename || '') + ' ' + (img.source || '') + ' ' + (img.flag_reason || '');
+      if (haystack.toLowerCase().indexOf(searchVal) === -1) continue;
+    }
+    filteredIdx.push(i);
+  }
+
+  var statsEl = document.getElementById('sidebar-stats');
+  var nFlagged = allImages.filter(function(i) { return i.flagged; }).length;
+  var nCorrected = allImages.filter(function(i) { return i.annotated; }).length;
+  statsEl.textContent = filteredIdx.length + ' shown \u00b7 ' + nFlagged + ' flagged \u00b7 ' + nCorrected + ' corrected';
+
+  renderSidebar();
+
+  if (currentFilteredPos >= 0 && filteredIdx.length > 0) {
+    var curGlobalIdx = filteredIdx[currentFilteredPos];
+    if (curGlobalIdx === undefined) {
+      currentFilteredPos = Math.min(currentFilteredPos, filteredIdx.length - 1);
+    }
+  }
+}
+
+async function loadImage(filteredPos) {
+  if (filteredPos < 0 || filteredPos >= filteredIdx.length) return;
+  currentFilteredPos = filteredPos;
+  var globalIdx = filteredIdx[filteredPos];
+  var img = allImages[globalIdx];
+  selectedId = null;
+  _dirty = false;
+
   document.getElementById('image-name').textContent = img.filename || '';
 
-  // Load annotations (corrected if available, else original)
-  const annResp = await fetch(`/api/annotations/${img.id}`);
-  const annData = await annResp.json();
-  currentAnns = (annData.boxes || []).map(b => ({ ...b }));
+  var annResp = await fetch('/api/annotations/' + img.id);
+  var annData = await annResp.json();
+  currentAnns = (annData.boxes || []).map(function(b) { return Object.assign({}, b); });
 
-  // Load image
-  const imgEl = new Image();
-  imgEl.onload = () => {
+  var imgEl = new Image();
+  imgEl.onload = function() {
     currentImg = imgEl;
-    fitCanvas(imgEl.width, imgEl.height);
+    resetZoom();
     render();
     renderAnnPanel();
   };
-  imgEl.src = `/api/image/${img.filename}`;
+  imgEl.src = '/api/image/' + img.filename;
 
   renderSidebar();
   setStatus();
 }
 
 // ---------------------------------------------------------------------------
-// Canvas / rendering
+// Pan & Zoom
 // ---------------------------------------------------------------------------
 
-function fitCanvas(w, h) {
-  const wrap  = document.getElementById('canvas-wrap');
-  const maxW  = wrap.clientWidth  - 20;
-  const maxH  = wrap.clientHeight - 20;
-  scale       = Math.min(1, maxW / w, maxH / h);
-  canvas.width  = Math.round(w * scale);
-  canvas.height = Math.round(h * scale);
+function resetZoom() {
+  if (!currentImg) return;
+  var maxW = canvasWrap.clientWidth;
+  var maxH = canvasWrap.clientHeight;
+  baseScale = Math.min(maxW / currentImg.width, maxH / currentImg.height);
+  zoom = 1.0;
+  var scaledW = currentImg.width * baseScale;
+  var scaledH = currentImg.height * baseScale;
+  viewX = (maxW - scaledW) / 2;
+  viewY = (maxH - scaledH) / 2;
+  updateCanvasTransform();
+  updateZoomIndicator();
 }
+
+function updateCanvasTransform() {
+  if (!currentImg) return;
+  var s = baseScale * zoom;
+  canvas.width  = currentImg.width;
+  canvas.height = currentImg.height;
+  canvas.style.transform = 'translate(' + viewX + 'px, ' + viewY + 'px) scale(' + s + ')';
+}
+
+function updateZoomIndicator() {
+  document.getElementById('zoom-indicator').textContent = Math.round(baseScale * zoom * 100) + '%';
+}
+
+function screenToImage(sx, sy) {
+  var s = baseScale * zoom;
+  return { x: (sx - viewX) / s, y: (sy - viewY) / s };
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
 
 function render() {
   if (!currentImg) return;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(currentImg, 0, 0, canvas.width, canvas.height);
+  var w = currentImg.width;
+  var h = currentImg.height;
 
-  // Draw bboxes
-  currentAnns.forEach(box => {
-    const sel   = box.id === selectedId;
-    const color = CAT_COLORS[box.category] ?? '#ffffff';
-    const sx = box.x * scale, sy = box.y * scale;
-    const sw = box.w * scale, sh = box.h * scale;
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(currentImg, 0, 0);
+
+  currentAnns.forEach(function(box) {
+    var sel   = box.id === selectedId;
+    var color = CAT_COLORS[box.category] || '#ffffff';
+    var cx = box.x + box.w / 2;
+    var cy = box.y + box.h / 2;
 
     ctx.strokeStyle = color;
     ctx.lineWidth   = sel ? 3 : 1.5;
-    ctx.strokeRect(sx, sy, sw, sh);
 
-    if (sel) {
-      ctx.fillStyle = color + '30';
-      ctx.fillRect(sx, sy, sw, sh);
+    if (box.category === CAT_CORNER) {
+      ctx.strokeRect(box.x, box.y, box.w, box.h);
+      var arm = 8;
+      ctx.beginPath();
+      ctx.moveTo(cx - box.w/2 - arm, cy);
+      ctx.lineTo(cx + box.w/2 + arm, cy);
+      ctx.moveTo(cx, cy - box.h/2 - arm);
+      ctx.lineTo(cx, cy + box.h/2 + arm);
+      ctx.stroke();
+    } else {
+      var r = Math.max(box.w, box.h) / 2;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+      ctx.fill();
     }
 
-    // Label
-    const lbl = boxLabel(box);
+    if (sel) {
+      ctx.fillStyle = color + '25';
+      ctx.fillRect(box.x - 2, box.y - 2, box.w + 4, box.h + 4);
+    }
+
+    var lbl = boxLabel(box);
     ctx.fillStyle = color;
-    ctx.font      = 'bold 11px monospace';
-    ctx.fillText(lbl, sx + 2, sy - 3);
+    ctx.font = (sel ? 'bold 13' : 'bold 11') + 'px -apple-system, sans-serif';
+    ctx.fillText(lbl, box.x + box.w + 4, box.y + box.h / 2 + 4);
   });
 
-  // Crosshair
-  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-  ctx.lineWidth   = 1;
-  ctx.setLineDash([4, 4]);
-  ctx.beginPath();
-  ctx.moveTo(mouseX, 0); ctx.lineTo(mouseX, canvas.height);
-  ctx.moveTo(0, mouseY); ctx.lineTo(canvas.width, mouseY);
-  ctx.stroke();
-  ctx.setLineDash([]);
+  if (!isPanning) {
+    var im = screenToImage(mouseScreenX, mouseScreenY);
+    if (im.x >= 0 && im.x <= w && im.y >= 0 && im.y <= h) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+      ctx.lineWidth = 0.5;
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath();
+      ctx.moveTo(im.x, 0); ctx.lineTo(im.x, h);
+      ctx.moveTo(0, im.y); ctx.lineTo(w, im.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
 }
 
 function renderMagnifier() {
-  if (!currentImg) return;
-  const half   = (MAG_SIZE / MAG_ZOOM) / 2;
-  const srcX   = mouseX / scale - half;
-  const srcY   = mouseY / scale - half;
-  const srcW   = MAG_SIZE / MAG_ZOOM;
-  const srcH   = MAG_SIZE / MAG_ZOOM;
+  if (!currentImg || !magEnabled) {
+    document.getElementById('mag-wrap').style.display = 'none';
+    return;
+  }
+  var magWrap = document.getElementById('mag-wrap');
+  var wrapRect = canvasWrap.getBoundingClientRect();
+
+  var offset = 20;
+  var mx = mouseScreenX + wrapRect.left + offset;
+  var my = mouseScreenY + wrapRect.top - MAG_SIZE - offset;
+  if (my < 0) my = mouseScreenY + wrapRect.top + offset;
+  if (mx + MAG_SIZE > window.innerWidth) mx = mouseScreenX + wrapRect.left - MAG_SIZE - offset;
+
+  magWrap.style.left = mx + 'px';
+  magWrap.style.top = my + 'px';
+  magWrap.style.display = 'block';
+
+  var im = screenToImage(mouseScreenX, mouseScreenY);
+  var half = (MAG_SIZE / MAG_ZOOM) / 2;
+  var srcX = im.x - half;
+  var srcY = im.y - half;
+  var srcW = MAG_SIZE / MAG_ZOOM;
 
   magCtx.clearRect(0, 0, MAG_SIZE, MAG_SIZE);
-  magCtx.drawImage(currentImg, srcX, srcY, srcW, srcH, 0, 0, MAG_SIZE, MAG_SIZE);
+  magCtx.drawImage(currentImg, srcX, srcY, srcW, srcW, 0, 0, MAG_SIZE, MAG_SIZE);
 
-  // Crosshair in magnifier
-  magCtx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
-  magCtx.lineWidth   = 1;
+  magCtx.strokeStyle = 'rgba(255, 60, 60, 0.8)';
+  magCtx.lineWidth = 1;
   magCtx.beginPath();
   magCtx.moveTo(MAG_SIZE / 2, 0); magCtx.lineTo(MAG_SIZE / 2, MAG_SIZE);
   magCtx.moveTo(0, MAG_SIZE / 2); magCtx.lineTo(MAG_SIZE, MAG_SIZE / 2);
   magCtx.stroke();
 
-  // Bboxes in magnifier
-  currentAnns.forEach(box => {
-    const color = CAT_COLORS[box.category] ?? '#ffffff';
-    const bx = (box.x - srcX) * MAG_ZOOM;
-    const by = (box.y - srcY) * MAG_ZOOM;
-    const bw = box.w * MAG_ZOOM;
-    const bh = box.h * MAG_ZOOM;
+  currentAnns.forEach(function(box) {
+    var color = CAT_COLORS[box.category] || '#ffffff';
+    var bx = (box.x - srcX) * MAG_ZOOM;
+    var by = (box.y - srcY) * MAG_ZOOM;
+    var bw = box.w * MAG_ZOOM;
+    var bh = box.h * MAG_ZOOM;
     magCtx.strokeStyle = color;
-    magCtx.lineWidth   = 1.5;
-    magCtx.strokeRect(bx, by, bw, bh);
+    magCtx.lineWidth = 1.5;
+    if (box.category === CAT_CORNER) {
+      magCtx.strokeRect(bx, by, bw, bh);
+    } else {
+      magCtx.beginPath();
+      magCtx.arc(bx + bw/2, by + bh/2, Math.max(bw, bh)/2, 0, Math.PI * 2);
+      magCtx.stroke();
+    }
   });
 }
 
@@ -202,30 +324,42 @@ function renderMagnifier() {
 // ---------------------------------------------------------------------------
 
 function boxLabel(box) {
-  if (box.category !== CORNER_CAT) return CAT_NAMES[box.category] ?? `cls${box.category}`;
-  // TL / TR / BR / BL based on position relative to centroid of all corners
-  const corners = currentAnns.filter(b => b.category === CORNER_CAT);
-  if (corners.length < 2) return 'corner';
-  const cx = corners.reduce((s, b) => s + b.x + b.w / 2, 0) / corners.length;
-  const cy = corners.reduce((s, b) => s + b.y + b.h / 2, 0) / corners.length;
-  const bcx = box.x + box.w / 2, bcy = box.y + box.h / 2;
-  return (bcy < cy ? 'T' : 'B') + (bcx < cx ? 'L' : 'R');
+  if (box.category === CAT_BLACK) return 'B';
+  if (box.category === CAT_WHITE) return 'W';
+  var corners = currentAnns.filter(function(b) { return b.category === CAT_CORNER; });
+  if (corners.length < 2) return 'C';
+  var cx2 = corners.reduce(function(s, b) { return s + b.x + b.w / 2; }, 0) / corners.length;
+  var cy2 = corners.reduce(function(s, b) { return s + b.y + b.h / 2; }, 0) / corners.length;
+  var bcx = box.x + box.w / 2, bcy = box.y + box.h / 2;
+  return (bcy < cy2 ? 'T' : 'B') + (bcx < cx2 ? 'L' : 'R');
 }
 
 function getCanvasCoords(e) {
-  const r = canvas.getBoundingClientRect();
+  var r = canvasWrap.getBoundingClientRect();
   return { x: e.clientX - r.left, y: e.clientY - r.top };
 }
 
-function boxAt(cx, cy) {
-  // Return the topmost box whose scaled rect contains (cx, cy)
-  for (let i = currentAnns.length - 1; i >= 0; i--) {
-    const b  = currentAnns[i];
-    const sx = b.x * scale, sy = b.y * scale;
-    const sw = b.w * scale, sh = b.h * scale;
-    if (cx >= sx && cx <= sx + sw && cy >= sy && cy <= sy + sh) return b;
+function boxAtImage(imgX, imgY) {
+  var s = baseScale * zoom;
+  var padImg = HIT_PADDING / s;
+  for (var i = currentAnns.length - 1; i >= 0; i--) {
+    var b = currentAnns[i];
+    var cx = b.x + b.w / 2;
+    var cy = b.y + b.h / 2;
+    if (b.category !== CAT_CORNER) {
+      var r = Math.max(b.w, b.h) / 2 + padImg;
+      if (Math.hypot(imgX - cx, imgY - cy) <= r) return b;
+    } else {
+      if (imgX >= b.x - padImg && imgX <= b.x + b.w + padImg &&
+          imgY >= b.y - padImg && imgY <= b.y + b.h + padImg) return b;
+    }
   }
   return null;
+}
+
+function getCurrentImage() {
+  if (currentFilteredPos < 0 || currentFilteredPos >= filteredIdx.length) return null;
+  return allImages[filteredIdx[currentFilteredPos]];
 }
 
 // ---------------------------------------------------------------------------
@@ -233,38 +367,86 @@ function boxAt(cx, cy) {
 // ---------------------------------------------------------------------------
 
 function onMouseDown(e) {
-  if (e.button !== 0) return;
-  const { x, y } = getCanvasCoords(e);
-  dragStartX = x; dragStartY = y;
-  hasDragged  = false;
+  var coords = getCanvasCoords(e);
+  var sx = coords.x, sy = coords.y;
 
-  const hit = boxAt(x, y);
+  if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    e.preventDefault();
+    isPanning = true;
+    panStartX = e.clientX;
+    panStartY = e.clientY;
+    panOrigViewX = viewX;
+    panOrigViewY = viewY;
+    canvasWrap.style.cursor = 'grabbing';
+    return;
+  }
+
+  if (e.button !== 0) return;
+
+  var im = screenToImage(sx, sy);
+  dragStartX = sx;
+  dragStartY = sy;
+  hasDragged = false;
+
+  var hit = boxAtImage(im.x, im.y);
   if (hit) {
-    selectedId  = hit.id;
-    isDragging  = true;
-    dragOrigX   = hit.x;
-    dragOrigY   = hit.y;
+    selectedId = hit.id;
+    isDragging = true;
+    dragOrigX  = hit.x;
+    dragOrigY  = hit.y;
+    render();
+    renderAnnPanel();
+  } else if (activeTool === 'move') {
+    isPanning = true;
+    panStartX = e.clientX;
+    panStartY = e.clientY;
+    panOrigViewX = viewX;
+    panOrigViewY = viewY;
+    canvasWrap.style.cursor = 'grabbing';
   } else {
     isDragging = false;
+    selectedId = null;
+    render();
+    renderAnnPanel();
   }
-  render();
-  renderAnnPanel();
 }
 
 function onMouseMove(e) {
-  const { x, y } = getCanvasCoords(e);
-  mouseX = x; mouseY = y;
+  var coords = getCanvasCoords(e);
+  mouseScreenX = coords.x;
+  mouseScreenY = coords.y;
 
-  if (isDragging) {
-    const dist = Math.hypot(x - dragStartX, y - dragStartY);
+  if (isPanning) {
+    viewX = panOrigViewX + (e.clientX - panStartX);
+    viewY = panOrigViewY + (e.clientY - panStartY);
+    updateCanvasTransform();
+    render();
+    renderMagnifier();
+    return;
+  }
+
+  if (isDragging && selectedId !== null) {
+    var dist = Math.hypot(coords.x - dragStartX, coords.y - dragStartY);
     if (dist > DRAG_THRESH) {
       hasDragged = true;
-      const box = currentAnns.find(b => b.id === selectedId);
+      var box = currentAnns.find(function(b) { return b.id === selectedId; });
       if (box) {
-        box.x = dragOrigX + (x - dragStartX) / scale;
-        box.y = dragOrigY + (y - dragStartY) / scale;
+        var s = baseScale * zoom;
+        box.x = dragOrigX + (coords.x - dragStartX) / s;
+        box.y = dragOrigY + (coords.y - dragStartY) / s;
+        markDirty();
       }
     }
+  }
+
+  if (spaceDown) {
+    canvasWrap.style.cursor = 'grab';
+  } else if (activeTool === 'move') {
+    var im2 = screenToImage(coords.x, coords.y);
+    canvasWrap.style.cursor = boxAtImage(im2.x, im2.y) ? 'move' : 'grab';
+  } else {
+    var im3 = screenToImage(coords.x, coords.y);
+    canvasWrap.style.cursor = boxAtImage(im3.x, im3.y) ? 'move' : 'crosshair';
   }
 
   render();
@@ -273,52 +455,155 @@ function onMouseMove(e) {
 }
 
 function onMouseUp(e) {
-  if (e.button !== 0) return;
-  const { x, y } = getCanvasCoords(e);
+  if (isPanning) {
+    isPanning = false;
+    canvasWrap.style.cursor = spaceDown ? 'grab' : (activeTool === 'move' ? 'grab' : 'crosshair');
+    return;
+  }
 
-  if (!isDragging && !hasDragged) {
-    // Plain click on empty space → add corner
-    const nCorners = currentAnns.filter(b => b.category === CORNER_CAT).length;
-    if (nCorners >= MAX_CORNERS) {
-      setStatus('⚠ Max 4 corners reached — right-click or Del to remove one first.');
+  if (e.button !== 0) return;
+  var coords = getCanvasCoords(e);
+
+  if (!isDragging && !hasDragged && activeTool !== 'move') {
+    var im = screenToImage(coords.x, coords.y);
+    var hit = boxAtImage(im.x, im.y);
+    if (hit) {
+      selectedId = hit.id;
     } else {
-      const imgX = x / scale - CORNER_SIZE / 2;
-      const imgY = y / scale - CORNER_SIZE / 2;
-      const newId = Date.now();
-      currentAnns.push({ id: newId, x: imgX, y: imgY, w: CORNER_SIZE, h: CORNER_SIZE, category: CORNER_CAT });
-      selectedId = newId;
-      renderAnnPanel();
+      addAnnotation(im.x, im.y);
     }
   }
 
   isDragging = false;
   hasDragged = false;
   render();
+  renderMagnifier();
   renderAnnPanel();
+}
+
+function onMouseLeave() {
+  document.getElementById('mag-wrap').style.display = 'none';
+  isPanning = false;
+  isDragging = false;
 }
 
 function onRightClick(e) {
   e.preventDefault();
-  const { x, y } = getCanvasCoords(e);
-  const hit = boxAt(x, y);
+  var coords = getCanvasCoords(e);
+  var im = screenToImage(coords.x, coords.y);
+  var hit = boxAtImage(im.x, im.y);
   if (hit) removeBox(hit.id);
 }
 
-function onKeyDown(e) {
-  if (e.target.matches('input, textarea')) return;
-  switch (e.key) {
-    case 'Delete': case 'Backspace': deleteSelected(); break;
-    case 's': case 'S': if (!e.ctrlKey && !e.metaKey) saveAnnotations(); break;
-    case 'n': case 'ArrowRight': nextImage(); break;
-    case 'p': case 'ArrowLeft':  prevImage(); break;
-    case 'Escape': selectedId = null; render(); renderAnnPanel(); break;
-  }
-  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveAnnotations(); }
+function onWheel(e) {
+  e.preventDefault();
+  var coords = getCanvasCoords(e);
+  var imBefore = screenToImage(coords.x, coords.y);
+
+  var delta = -e.deltaY * 0.001;
+  zoom = Math.max(0.1, Math.min(50, zoom * (1 + delta)));
+
+  var s = baseScale * zoom;
+  viewX = coords.x - imBefore.x * s;
+  viewY = coords.y - imBefore.y * s;
+
+  updateCanvasTransform();
+  updateZoomIndicator();
+  render();
+  renderMagnifier();
 }
 
 // ---------------------------------------------------------------------------
-// Actions
+// Keyboard
 // ---------------------------------------------------------------------------
+
+function onKeyDown(e) {
+  if (e.target.matches('input, textarea, select')) return;
+
+  if (e.key === ' ') {
+    e.preventDefault();
+    spaceDown = true;
+    if (!isPanning) canvasWrap.style.cursor = 'grab';
+    return;
+  }
+
+  switch (e.key) {
+    case 'Delete': case 'Backspace': deleteSelected(); break;
+    case 'ArrowRight': if (e.shiftKey) nextFiltered(); else nextImage(); break;
+    case 'ArrowLeft':  if (e.shiftKey) prevFiltered(); else prevImage(); break;
+    case 'Escape': selectedId = null; render(); renderAnnPanel(); break;
+    case '1': setTool('corner'); break;
+    case '2': setTool('black'); break;
+    case '3': setTool('white'); break;
+    case 'v': case 'V': setTool('move'); break;
+    case '0': resetZoom(); render(); break;
+    case 'm': case 'M':
+      magEnabled = !magEnabled;
+      if (!magEnabled) document.getElementById('mag-wrap').style.display = 'none';
+      break;
+    case 's': case 'S':
+      if (e.ctrlKey || e.metaKey) { e.preventDefault(); saveAnnotations(); }
+      break;
+  }
+}
+
+function onKeyUp(e) {
+  if (e.key === ' ') {
+    spaceDown = false;
+    if (!isPanning) canvasWrap.style.cursor = activeTool === 'move' ? 'grab' : 'crosshair';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tool mode
+// ---------------------------------------------------------------------------
+
+function setTool(tool) {
+  activeTool = tool;
+  document.querySelectorAll('.tool-btn').forEach(function(el) { el.classList.remove('active'); });
+  var btn = document.getElementById('tool-' + tool);
+  if (btn) btn.classList.add('active');
+  canvasWrap.style.cursor = tool === 'move' ? 'grab' : 'crosshair';
+}
+
+// ---------------------------------------------------------------------------
+// Annotation actions
+// ---------------------------------------------------------------------------
+
+function addAnnotation(imgX, imgY) {
+  var cat, size;
+  if (activeTool === 'corner') {
+    if (currentAnns.filter(function(b) { return b.category === CAT_CORNER; }).length >= MAX_CORNERS) {
+      showToast('Max 4 corners - delete one first', 'error');
+      return;
+    }
+    cat = CAT_CORNER;
+    size = CORNER_SIZE;
+  } else if (activeTool === 'black') {
+    cat = CAT_BLACK;
+    size = STONE_SIZE;
+  } else if (activeTool === 'white') {
+    cat = CAT_WHITE;
+    size = STONE_SIZE;
+  } else {
+    return;
+  }
+
+  var newId = Date.now() + Math.floor(Math.random() * 1000);
+  currentAnns.push({
+    id: newId,
+    x: imgX - size / 2,
+    y: imgY - size / 2,
+    w: size,
+    h: size,
+    category: cat,
+  });
+  selectedId = newId;
+  markDirty();
+  render();
+  renderMagnifier();
+  renderAnnPanel();
+}
 
 function deleteSelected() {
   if (selectedId === null) return;
@@ -326,87 +611,181 @@ function deleteSelected() {
 }
 
 function removeBox(id) {
-  currentAnns = currentAnns.filter(b => b.id !== id);
+  currentAnns = currentAnns.filter(function(b) { return b.id !== id; });
   if (selectedId === id) selectedId = null;
+  markDirty();
   render();
+  renderMagnifier();
   renderAnnPanel();
   setStatus();
 }
 
-function prevImage() { if (currentIdx > 0) loadImage(currentIdx - 1); }
-function nextImage() { if (currentIdx < images.length - 1) loadImage(currentIdx + 1); }
+// ---------------------------------------------------------------------------
+// Navigation
+// ---------------------------------------------------------------------------
+
+var _dirty = false;
+
+function markDirty() { _dirty = true; }
+
+async function autoSaveIfDirty() {
+  if (_dirty) {
+    await saveAnnotations();
+    _dirty = false;
+  }
+}
+
+async function prevImage() {
+  if (currentFilteredPos > 0) {
+    await autoSaveIfDirty();
+    loadImage(currentFilteredPos - 1);
+  }
+}
+async function nextImage() {
+  if (currentFilteredPos < filteredIdx.length - 1) {
+    await autoSaveIfDirty();
+    loadImage(currentFilteredPos + 1);
+  }
+}
+
+async function prevFiltered() {
+  for (var i = currentFilteredPos - 1; i >= 0; i--) {
+    if (allImages[filteredIdx[i]].flagged) { await autoSaveIfDirty(); loadImage(i); return; }
+  }
+  showToast('No more flagged images before', 'error');
+}
+
+async function nextFiltered() {
+  for (var i = currentFilteredPos + 1; i < filteredIdx.length; i++) {
+    if (allImages[filteredIdx[i]].flagged) { await autoSaveIfDirty(); loadImage(i); return; }
+  }
+  showToast('No more flagged images after', 'error');
+}
+
+// ---------------------------------------------------------------------------
+// Save
+// ---------------------------------------------------------------------------
 
 async function saveAnnotations() {
-  if (images.length === 0) return;
-  const img = images[currentIdx];
-  await fetch(`/api/annotations/${img.id}`, {
+  var img = getCurrentImage();
+  if (!img) return;
+  await fetch('/api/annotations/' + img.id, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ boxes: currentAnns, image_id: img.id, filename: img.filename }),
   });
-  images[currentIdx].annotated = true;
+  _dirty = false;
+  var gIdx = filteredIdx[currentFilteredPos];
+  allImages[gIdx].annotated = true;
+  allImages[gIdx].corner_count = currentAnns.filter(function(b) { return b.category === CAT_CORNER; }).length;
   renderSidebar();
-  setStatus('✓ Saved!', 2000);
+  showToast('Saved!');
 }
 
 // ---------------------------------------------------------------------------
-// UI rendering
+// Sidebar
 // ---------------------------------------------------------------------------
 
 function renderSidebar() {
-  const list = document.getElementById('image-list');
+  var list = document.getElementById('image-list');
   list.innerHTML = '';
-  images.forEach((img, i) => {
-    const el = document.createElement('div');
+
+  filteredIdx.forEach(function(gIdx, fPos) {
+    var img = allImages[gIdx];
+    var el = document.createElement('div');
     el.className = 'img-item'
-      + (i === currentIdx ? ' active'    : '')
-      + (img.flagged       ? ' flagged'   : '')
-      + (img.annotated     ? ' annotated' : '');
+      + (fPos === currentFilteredPos ? ' active' : '')
+      + (img.flagged    ? ' flagged'   : '')
+      + (img.annotated  ? ' annotated' : '');
     el.title = img.flag_reason || img.filename || '';
-    el.innerHTML = `<span class="img-num">${i + 1}</span><span class="img-src">${img.source || ''}</span>`;
-    el.onclick = () => loadImage(i);
+
+    var badges = '';
+    if (img.flagged) badges += '<span class="img-badge flag"></span>';
+    if (img.annotated) badges += '<span class="img-badge ok"></span>';
+
+    var cc = img.corner_count || 0;
+    var cornerBadge = img.annotated
+      ? '<span class="corner-badge ' + (cc === 4 ? 'ok' : 'warn') + '">' + cc + '</span>'
+      : '';
+
+    el.innerHTML = '<span class="img-num">' + (gIdx + 1) + '</span>' + badges +
+      '<span class="img-src">' + (img.source || img.filename || '') + '</span>' + cornerBadge;
+    el.onclick = function() { autoSaveIfDirty().then(function() { loadImage(fPos); }); };
     list.appendChild(el);
+
+    if (fPos === currentFilteredPos) {
+      requestAnimationFrame(function() { el.scrollIntoView({ block: 'nearest' }); });
+    }
   });
-  document.getElementById('image-counter').textContent = `${currentIdx + 1} / ${images.length}`;
+
+  document.getElementById('image-counter').textContent =
+    (currentFilteredPos + 1) + ' / ' + filteredIdx.length;
 }
 
+// ---------------------------------------------------------------------------
+// Annotation panel
+// ---------------------------------------------------------------------------
+
 function renderAnnPanel() {
-  const corners = currentAnns.filter(b => b.category === CORNER_CAT);
-  const others  = currentAnns.filter(b => b.category !== CORNER_CAT);
+  var corners = currentAnns.filter(function(b) { return b.category === CAT_CORNER; });
+  var blacks  = currentAnns.filter(function(b) { return b.category === CAT_BLACK; });
+  var whites  = currentAnns.filter(function(b) { return b.category === CAT_WHITE; });
 
-  let html = `<div class="grp-title">Board Corners (${corners.length}/${MAX_CORNERS})</div>`;
+  var html = '';
 
+  html += '<div class="grp-title">Corners (' + corners.length + '/' + MAX_CORNERS + ')</div>';
   if (corners.length === 0) {
-    html += `<div style="color:#555;font-size:10px;">Click image to add corners</div>`;
+    html += '<div style="color:var(--text-muted);font-size:12px;padding:2px 6px;">Select Corner tool & click</div>';
   }
-  corners.forEach(box => {
-    const lbl = boxLabel(box);
-    const sel = box.id === selectedId;
-    html += `<div class="ann-item${sel ? ' sel' : ''}" onclick="selectBox(${box.id})">
-      <span class="corner-lbl">${lbl}</span>
-      <span class="ann-coords">(${Math.round(box.x)}, ${Math.round(box.y)})</span>
-      <button class="del-btn" onclick="event.stopPropagation(); removeBox(${box.id})">✕</button>
-    </div>`;
+  corners.forEach(function(box) {
+    var lbl = boxLabel(box);
+    var sel = box.id === selectedId;
+    var cx = Math.round(box.x + box.w / 2);
+    var cy = Math.round(box.y + box.h / 2);
+    html += '<div class="ann-item' + (sel ? ' sel' : '') + '" onclick="selectBox(' + box.id + ')">' +
+      '<span class="corner-lbl">' + lbl + '</span>' +
+      '<span class="ann-coords">(' + cx + ', ' + cy + ')</span>' +
+      '<button class="del-btn" onclick="event.stopPropagation(); removeBox(' + box.id + ')" title="Delete">\u2715</button>' +
+      '</div>';
   });
 
-  if (others.length > 0) {
-    html += `<div class="grp-title" style="margin-top:10px;">Other (${others.length})</div>`;
-    others.forEach(box => {
-      const name = CAT_NAMES[box.category] ?? `cls${box.category}`;
-      html += `<div class="ann-item"><span style="color:#aaa">${name}</span>
-        <span class="ann-coords">(${Math.round(box.x)}, ${Math.round(box.y)})</span></div>`;
+  if (blacks.length > 0 || activeTool === 'black') {
+    html += '<div class="grp-title">Black Stones (' + blacks.length + ')</div>';
+    blacks.forEach(function(box) {
+      var sel = box.id === selectedId;
+      var cx = Math.round(box.x + box.w / 2);
+      var cy = Math.round(box.y + box.h / 2);
+      html += '<div class="ann-item' + (sel ? ' sel' : '') + '" onclick="selectBox(' + box.id + ')">' +
+        '<span class="stone-lbl black">B</span>' +
+        '<span class="ann-coords">(' + cx + ', ' + cy + ')</span>' +
+        '<button class="del-btn" onclick="event.stopPropagation(); removeBox(' + box.id + ')" title="Delete">\u2715</button>' +
+        '</div>';
     });
   }
 
-  html += `<div class="hint">
-    <strong>Click</strong> empty → add corner<br>
-    <strong>Drag</strong> box → move<br>
-    <strong>Right-click</strong> → delete<br>
-    <strong>Del</strong> → delete selected<br>
-    <strong>S</strong> → save<br>
-    <strong>N / P</strong> → next / prev<br>
-    <strong>Esc</strong> → deselect
-  </div>`;
+  if (whites.length > 0 || activeTool === 'white') {
+    html += '<div class="grp-title">White Stones (' + whites.length + ')</div>';
+    whites.forEach(function(box) {
+      var sel = box.id === selectedId;
+      var cx = Math.round(box.x + box.w / 2);
+      var cy = Math.round(box.y + box.h / 2);
+      html += '<div class="ann-item' + (sel ? ' sel' : '') + '" onclick="selectBox(' + box.id + ')">' +
+        '<span class="stone-lbl white">W</span>' +
+        '<span class="ann-coords">(' + cx + ', ' + cy + ')</span>' +
+        '<button class="del-btn" onclick="event.stopPropagation(); removeBox(' + box.id + ')" title="Delete">\u2715</button>' +
+        '</div>';
+    });
+  }
+
+  var img = getCurrentImage();
+  if (img) {
+    html += '<div class="grp-title" style="margin-top:8px;">Image Info</div>';
+    html += '<div style="font-size:12px;color:var(--text-muted);padding:2px 6px;line-height:1.6;">';
+    html += 'Source: ' + (img.source || '-') + '<br>';
+    if (img.flagged) html += '\u26a0 ' + (img.flag_reason || 'Flagged') + '<br>';
+    if (img.width && img.height) html += 'Size: ' + img.width + '\u00d7' + img.height + '<br>';
+    html += '</div>';
+  }
 
   document.getElementById('ann-list').innerHTML = html;
 }
@@ -417,20 +796,37 @@ function selectBox(id) {
   renderAnnPanel();
 }
 
-let _statusTimer = null;
-function setStatus(msg, clearAfterMs) {
-  const bar = document.getElementById('status-bar');
-  if (_statusTimer) { clearTimeout(_statusTimer); _statusTimer = null; }
+// ---------------------------------------------------------------------------
+// Toast
+// ---------------------------------------------------------------------------
 
-  if (msg) {
-    bar.textContent = msg;
-    if (clearAfterMs) _statusTimer = setTimeout(() => setStatus(), clearAfterMs);
-    return;
-  }
+var _toastTimer = null;
+function showToast(msg, type) {
+  var el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = type === 'error' ? 'show error' : 'show';
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(function() { el.className = ''; _toastTimer = null; }, 1800);
+}
 
-  const img = images[currentIdx];
+// ---------------------------------------------------------------------------
+// Status bar
+// ---------------------------------------------------------------------------
+
+function setStatus() {
+  var bar = document.querySelector('#status-bar .status-text');
+  var img = getCurrentImage();
   if (!img) { bar.textContent = 'No images loaded'; return; }
-  const nCorners = currentAnns.filter(b => b.category === CORNER_CAT).length;
-  const cursor   = `cursor (${Math.round(mouseX / scale)}, ${Math.round(mouseY / scale)})`;
-  bar.textContent = `[${currentIdx + 1}/${images.length}] ${img.filename}  |  corners: ${nCorners}/${MAX_CORNERS}  |  ${cursor}`;
+
+  var im = screenToImage(mouseScreenX, mouseScreenY);
+  var nCorners = currentAnns.filter(function(b) { return b.category === CAT_CORNER; }).length;
+  var nBlack   = currentAnns.filter(function(b) { return b.category === CAT_BLACK; }).length;
+  var nWhite   = currentAnns.filter(function(b) { return b.category === CAT_WHITE; }).length;
+  var tool     = activeTool.charAt(0).toUpperCase() + activeTool.slice(1);
+
+  bar.textContent = '[' + (currentFilteredPos + 1) + '/' + filteredIdx.length + '] ' + img.filename +
+    '  \u00b7  Tool: ' + tool +
+    '  \u00b7  Corners: ' + nCorners +
+    '  \u00b7  B: ' + nBlack + '  W: ' + nWhite +
+    '  \u00b7  (' + Math.round(im.x) + ', ' + Math.round(im.y) + ')';
 }

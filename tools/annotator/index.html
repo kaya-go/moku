@@ -3,14 +3,36 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Moku Corner Annotator</title>
+  <title>Moku Annotator</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
 
+    :root {
+      --bg-dark: #0f0f17;
+      --bg-panel: #16182a;
+      --bg-hover: #1e2040;
+      --bg-active: #2a2d52;
+      --border: #2a2c4a;
+      --text: #d4d4e8;
+      --text-dim: #6a6a8a;
+      --text-muted: #4a4a6a;
+      --accent: #6c63ff;
+      --accent-light: #8b83ff;
+      --green: #22c55e;
+      --green-dim: #166534;
+      --orange: #f97316;
+      --red: #ef4444;
+      --red-dim: #7f1d1d;
+      --blue: #3b82f6;
+      --pink: #ec4899;
+      --teal: #14b8a6;
+      --radius: 6px;
+    }
+
     body {
-      background: #1a1a2e;
-      color: #e0e0e0;
-      font-family: 'Courier New', monospace;
+      background: var(--bg-dark);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
       height: 100vh;
       display: flex;
       flex-direction: column;
@@ -22,158 +44,404 @@
     #toolbar {
       display: flex;
       align-items: center;
-      gap: 8px;
-      padding: 7px 14px;
-      background: #16213e;
-      border-bottom: 1px solid #2a2a4a;
+      gap: 6px;
+      padding: 6px 12px;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
       flex-shrink: 0;
+      z-index: 10;
     }
-    #toolbar button {
-      padding: 4px 12px;
-      border: 1px solid #3a3a5a;
-      background: #0f3460;
-      color: #e0e0e0;
+    .tb-group {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .tb-sep {
+      width: 1px;
+      height: 22px;
+      background: var(--border);
+      margin: 0 6px;
+    }
+    #toolbar button, #toolbar .tb-btn {
+      padding: 6px 12px;
+      border: 1px solid var(--border);
+      background: var(--bg-hover);
+      color: var(--text);
       cursor: pointer;
-      border-radius: 3px;
-      font-size: 12px;
+      border-radius: var(--radius);
+      font-size: 14px;
       font-family: inherit;
-      transition: background 0.15s;
+      transition: all 0.12s;
+      line-height: 1;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
     }
-    #toolbar button:hover { background: #1a5090; }
-    #toolbar .btn-save   { background: #0d6e39; }
-    #toolbar .btn-save:hover { background: #0a5230; }
-    #toolbar .btn-delete { background: #6e1d1d; }
-    #toolbar .btn-delete:hover { background: #521515; }
-    #image-counter { color: #888; font-size: 12px; min-width: 70px; }
-    #image-name    { color: #88aaff; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+    #toolbar button:hover { background: var(--bg-active); border-color: #3a3c6a; }
+    #toolbar button:active { transform: scale(0.97); }
+    .btn-save { background: var(--green-dim) !important; border-color: var(--green) !important; }
+    .btn-save:hover { background: #1a7a3a !important; }
+    .btn-delete { background: var(--red-dim) !important; border-color: var(--red) !important; }
+    .btn-delete:hover { background: #991b1b !important; }
+    .btn-icon { font-size: 14px; }
+    #image-counter {
+      color: var(--text-dim);
+      font-size: 14px;
+      min-width: 70px;
+      text-align: center;
+      font-variant-numeric: tabular-nums;
+    }
+    #image-name {
+      color: var(--accent-light);
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 250px;
+    }
     .spacer { flex: 1; }
+
+    /* Tool mode buttons */
+    .tool-btn {
+      position: relative;
+    }
+    .tool-btn.active {
+      background: var(--accent) !important;
+      border-color: var(--accent-light) !important;
+      color: #fff !important;
+    }
+    .tool-btn .badge {
+      font-size: 11px;
+      padding: 0 4px;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      margin-left: 2px;
+    }
+    .tool-btn.active .badge {
+      background: rgba(255,255,255,0.25);
+    }
 
     /* ── Main area ── */
     #main { display: flex; flex: 1; overflow: hidden; }
 
     /* ── Image list sidebar ── */
-    #image-list {
-      width: 130px;
-      overflow-y: auto;
-      background: #16213e;
-      border-right: 1px solid #2a2a4a;
-      padding: 4px;
+    #sidebar {
+      width: 220px;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border);
       flex-shrink: 0;
     }
-    .img-item {
-      padding: 4px 6px;
+    #sidebar-controls {
+      padding: 6px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    #filter-select {
+      width: 100%;
+      padding: 5px 8px;
+      background: var(--bg-dark);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-family: inherit;
       cursor: pointer;
-      font-size: 11px;
-      border-radius: 2px;
-      margin-bottom: 2px;
+    }
+    #sidebar-search {
+      width: 100%;
+      padding: 5px 8px;
+      background: var(--bg-dark);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 13px;
+      font-family: inherit;
+    }
+    #sidebar-search::placeholder { color: var(--text-muted); }
+    #sidebar-stats {
+      padding: 5px 8px;
+      font-size: 12px;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+    }
+    #image-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 3px;
+    }
+    #image-list::-webkit-scrollbar { width: 5px; }
+    #image-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .img-item {
+      padding: 6px 8px;
+      cursor: pointer;
+      font-size: 13px;
+      border-radius: var(--radius);
+      margin-bottom: 1px;
       display: flex;
       align-items: center;
-      gap: 4px;
+      gap: 6px;
       border-left: 3px solid transparent;
+      transition: background 0.1s;
     }
-    .img-item:hover { background: #0f3460; }
-    .img-item.active { background: #e94560; color: #fff; border-left-color: #fff; }
-    .img-item.flagged    { border-left-color: #ff9900; }
-    .img-item.annotated  { border-left-color: #00cc88; }
+    .img-item:hover { background: var(--bg-hover); }
+    .img-item.active { background: var(--accent); color: #fff; border-left-color: #fff; }
+    .img-item.flagged    { border-left-color: var(--orange); }
+    .img-item.annotated  { border-left-color: var(--green); }
     .img-item.flagged.annotated { border-left-color: #aaff44; }
-    .img-num { color: #666; font-size: 10px; min-width: 22px; }
-    .img-src { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .img-num { color: var(--text-muted); font-size: 12px; min-width: 24px; font-variant-numeric: tabular-nums; }
+    .img-item.active .img-num { color: rgba(255,255,255,0.6); }
+    .img-src { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+    .img-badge {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .img-badge.flag { background: var(--orange); }
+    .img-badge.ok   { background: var(--green); }
 
     /* ── Canvas area ── */
     #canvas-wrap {
       flex: 1;
-      display: flex;
-      align-items: center;
-      justify-content: center;
       position: relative;
-      background: #0d1117;
+      background: var(--bg-dark);
       overflow: hidden;
+      cursor: crosshair;
     }
-    #main-canvas { cursor: crosshair; display: block; }
-
-    /* ── Magnifier ── */
-    #mag-wrap {
+    #main-canvas {
       position: absolute;
-      bottom: 14px;
-      right: 14px;
-      width: 180px;
-      height: 180px;
+      top: 0;
+      left: 0;
+      transform-origin: 0 0;
+      image-rendering: auto;
+    }
+
+    /* ── Magnifier (follows mouse) ── */
+    #mag-wrap {
+      position: fixed;
+      width: 200px;
+      height: 200px;
       border-radius: 50%;
-      border: 2px solid #444;
+      border: 2px solid rgba(108,99,255,0.6);
       overflow: hidden;
       pointer-events: none;
       background: #000;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+      z-index: 100;
+      display: none;
+      transition: opacity 0.15s;
     }
     #mag-canvas { display: block; }
 
-    /* ── Annotation panel ── */
+    /* ── Right panel ── */
     #ann-panel {
-      width: 190px;
+      width: 240px;
       overflow-y: auto;
-      background: #16213e;
-      border-left: 1px solid #2a2a4a;
+      background: var(--bg-panel);
+      border-left: 1px solid var(--border);
       padding: 10px 8px;
-      font-size: 11px;
+      font-size: 13px;
       flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
     }
-    #ann-panel h3 { color: #88aaff; margin-bottom: 8px; border-bottom: 1px solid #2a2a4a; padding-bottom: 4px; font-size: 12px; }
-    .grp-title { color: #ff9900; font-size: 10px; font-weight: bold; margin: 6px 0 4px; }
+    #ann-panel::-webkit-scrollbar { width: 5px; }
+    #ann-panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    #ann-panel h3 {
+      color: var(--accent-light);
+      margin-bottom: 2px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid var(--border);
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .grp-title {
+      color: var(--orange);
+      font-size: 12px;
+      font-weight: 700;
+      margin: 4px 0 2px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
     .ann-item {
-      display: flex; align-items: center; gap: 4px;
-      padding: 2px 4px; border-radius: 2px; cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 6px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: background 0.1s;
     }
-    .ann-item:hover, .ann-item.sel { background: #0f3460; }
-    .corner-lbl { color: #ff6600; font-weight: bold; min-width: 22px; font-size: 11px; }
-    .ann-coords { color: #777; font-size: 10px; flex: 1; }
-    .del-btn { color: #e94560; background: none; border: none; cursor: pointer; font-size: 11px; padding: 0 2px; }
-    .del-btn:hover { color: #ff0000; }
-    .hint {
-      margin-top: 14px; padding: 8px; background: #0d1117;
-      border-radius: 3px; font-size: 10px; color: #666; line-height: 1.9;
+    .ann-item:hover { background: var(--bg-hover); }
+    .ann-item.sel { background: var(--bg-active); outline: 1px solid var(--accent); }
+    .corner-lbl { color: var(--orange); font-weight: 700; min-width: 22px; font-size: 13px; }
+    .stone-lbl { font-weight: 600; min-width: 22px; font-size: 13px; }
+    .stone-lbl.black { color: var(--pink); }
+    .stone-lbl.white { color: var(--teal); }
+    .ann-coords { color: var(--text-muted); font-size: 12px; flex: 1; font-variant-numeric: tabular-nums; }
+    .del-btn {
+      color: var(--red);
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 15px;
+      padding: 0 2px;
+      opacity: 0.5;
+      transition: opacity 0.12s;
     }
-    .hint strong { color: #888; }
+    .del-btn:hover { opacity: 1; }
+
+    /* Shortcuts panel */
+    .shortcuts-panel {
+      margin-top: auto;
+      padding: 10px;
+      background: var(--bg-dark);
+      border-radius: var(--radius);
+      font-size: 12px;
+      color: var(--text-muted);
+      line-height: 2;
+    }
+    .shortcuts-panel kbd {
+      background: var(--bg-hover);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      padding: 2px 5px;
+      font-size: 11px;
+      font-family: inherit;
+      color: var(--text-dim);
+    }
 
     /* ── Status bar ── */
     #status-bar {
-      padding: 3px 14px;
-      background: #16213e;
-      border-top: 1px solid #2a2a4a;
-      font-size: 10px;
-      color: #666;
+      padding: 5px 14px;
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-dim);
       white-space: nowrap;
       overflow: hidden;
       flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
     }
+    #status-bar .status-text { flex: 1; }
+    #status-bar .zoom-indicator {
+      font-variant-numeric: tabular-nums;
+      color: var(--accent-light);
+    }
+
+    /* Toast */
+    #toast {
+      position: fixed;
+      top: 50px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-10px);
+      background: var(--green);
+      color: #fff;
+      padding: 10px 24px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      pointer-events: none;
+      opacity: 0;
+      transition: all 0.25s ease;
+      z-index: 200;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+    }
+    #toast.show {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+    #toast.error { background: var(--red); }
+
+    /* Corner count badge in nav */
+    .corner-badge {
+      font-size: 11px;
+      padding: 1px 5px;
+      border-radius: 8px;
+      font-weight: 700;
+    }
+    .corner-badge.ok { background: var(--green-dim); color: var(--green); }
+    .corner-badge.warn { background: #78350f; color: var(--orange); }
   </style>
 </head>
 <body>
   <div id="toolbar">
-    <button onclick="prevImage()">← Prev (P)</button>
-    <span id="image-counter">0 / 0</span>
-    <button onclick="nextImage()">Next (N) →</button>
+    <div class="tb-group">
+      <button onclick="prevImage()" title="Previous image (←)"><span class="btn-icon">◀</span></button>
+      <span id="image-counter">0 / 0</span>
+      <button onclick="nextImage()" title="Next image (→)"><span class="btn-icon">▶</span></button>
+    </div>
+    <div class="tb-sep"></div>
+    <div class="tb-group">
+      <button onclick="prevFiltered()" title="Previous flagged (Shift+←)"><span class="btn-icon">◀</span>⚠</button>
+      <button onclick="nextFiltered()" title="Next flagged (Shift+→)">⚠<span class="btn-icon">▶</span></button>
+    </div>
     <span id="image-name">—</span>
     <div class="spacer"></div>
-    <button class="btn-delete" onclick="deleteSelected()">🗑 Delete (Del)</button>
-    <button class="btn-save"   onclick="saveAnnotations()">💾 Save (S)</button>
+    <div class="tb-group">
+      <button class="tool-btn active" id="tool-corner" onclick="setTool('corner')" title="Place corners (1)">📐 Corner</button>
+      <button class="tool-btn" id="tool-black" onclick="setTool('black')" title="Place black stones (2)">⚫ Black</button>
+      <button class="tool-btn" id="tool-white" onclick="setTool('white')" title="Place white stones (3)">⚪ White</button>
+      <button class="tool-btn" id="tool-move" onclick="setTool('move')" title="Move / select (V)">✋ Move</button>
+    </div>
+    <div class="tb-sep"></div>
+    <button class="btn-delete" onclick="deleteSelected()" title="Delete selected (Del)"><span class="btn-icon">🗑</span></button>
+    <button class="btn-save" onclick="saveAnnotations()" title="Save (Ctrl+S)"><span class="btn-icon">💾</span> Save</button>
+    <div class="tb-sep"></div>
+    <button onclick="resetZoom()" title="Reset zoom (0)">⟳ Fit</button>
   </div>
 
   <div id="main">
-    <div id="image-list"></div>
+    <div id="sidebar">
+      <div id="sidebar-controls">
+        <select id="filter-select" onchange="applyFilter()">
+          <option value="all">All images</option>
+          <option value="flagged">⚠ Flagged only</option>
+          <option value="not-corrected">Not corrected</option>
+          <option value="corrected">✓ Corrected</option>
+          <option value="flagged-not-corrected">⚠ Flagged & not corrected</option>
+        </select>
+        <input type="text" id="sidebar-search" placeholder="Search..." oninput="applyFilter()">
+      </div>
+      <div id="sidebar-stats"></div>
+      <div id="image-list"></div>
+    </div>
 
     <div id="canvas-wrap">
       <canvas id="main-canvas"></canvas>
       <div id="mag-wrap">
-        <canvas id="mag-canvas" width="180" height="180"></canvas>
+        <canvas id="mag-canvas" width="200" height="200"></canvas>
       </div>
     </div>
 
     <div id="ann-panel">
       <h3>Annotations</h3>
       <div id="ann-list"></div>
+      <div class="shortcuts-panel">
+        <kbd>1</kbd> Corner &nbsp; <kbd>2</kbd> Black &nbsp; <kbd>3</kbd> White &nbsp; <kbd>V</kbd> Move<br>
+        <kbd>Click</kbd> Add/Select &nbsp; <kbd>Drag</kbd> Move<br>
+        <kbd>Right-click</kbd> Delete &nbsp; <kbd>Del</kbd> Delete selected<br>
+        <kbd>←</kbd><kbd>→</kbd> Prev/Next &nbsp; <kbd>Shift+←</kbd><kbd>→</kbd> Flagged<br>
+        <kbd>Ctrl+S</kbd> Save &nbsp; <kbd>Scroll</kbd> Zoom &nbsp; <kbd>0</kbd> Fit<br>
+        <kbd>Space+Drag</kbd> Pan &nbsp; <kbd>Esc</kbd> Deselect<br>
+        <kbd>M</kbd> Toggle magnifier
+      </div>
     </div>
   </div>
 
-  <div id="status-bar">Loading…</div>
+  <div id="status-bar">
+    <span class="status-text">Loading…</span>
+    <span class="zoom-indicator" id="zoom-indicator">100%</span>
+  </div>
+
+  <div id="toast"></div>
 
   <script src="annotator.js"></script>
 </body>
