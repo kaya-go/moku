@@ -321,8 +321,21 @@ def _apply_augmentation(
 ) -> tuple[Image.Image, list[dict]]:
     """Apply albumentations augmentation to image and COCO annotations."""
     img_np = np.array(image)
-    bboxes = [ann["bbox"] for ann in annotations]
-    category_ids = [ann["category_id"] for ann in annotations]
+    h, w = img_np.shape[:2]
+
+    # Clip COCO bboxes to image bounds to avoid albumentations validation errors
+    # (source annotations can have coords slightly outside [0, w] / [0, h]).
+    bboxes = []
+    category_ids = []
+    for ann in annotations:
+        x, y, bw, bh = ann["bbox"]
+        x = max(0.0, min(float(x), w))
+        y = max(0.0, min(float(y), h))
+        bw = max(0.0, min(float(bw), w - x))
+        bh = max(0.0, min(float(bh), h - y))
+        if bw > 0 and bh > 0:
+            bboxes.append([x, y, bw, bh])
+            category_ids.append(ann["category_id"])
 
     result = aug(image=img_np, bboxes=bboxes, category_ids=category_ids)
 
