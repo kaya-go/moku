@@ -54,8 +54,9 @@ moku/
 │   ├── __init__.py
 │   ├── cli.py                 # CLI entry point
 │   ├── dataset.py             # Dataset loading and harmonization utilities
+│   ├── evaluation.py          # Evaluation utilities (mAP, center-distance, sweep)
 │   ├── runs.py                # W&B run fetching, artifact management
-│   ├── training.py            # Training utilities (transforms, collate, mAP eval)
+│   ├── training.py            # Training utilities (transforms, augmentation, collate)
 │   └── viz/                   # Visualization utilities
 ├── pixi.toml
 └── pyproject.toml
