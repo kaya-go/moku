@@ -25,6 +25,7 @@ set -euo pipefail
 
 export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FLAVOR="a10g-large"
 GROUP="${1:-all}"
 ROUND="r4"
