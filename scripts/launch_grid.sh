@@ -28,8 +28,7 @@ launch_stage1() {
 		--run-name "stage1_synthetic" \
 		--lr 1e-4 \
 		--num-epochs 30 \
-		--batch-size 16 \
-		--push-to-hub
+		--batch-size 16
 	echo "Stage 1 launched. Wait for completion before launching stage 2."
 }
 
@@ -52,9 +51,7 @@ launch_stage2() {
 			--run-name "$run_name" \
 			--lr "$lr" \
 			--num-epochs 500 \
-			--batch-size 16 \
-			--push-to-hub \
-			--hub-revision "$hub_rev"
+			--batch-size 16
 		sleep 3
 	done
 	echo "Stage 2 sweep launched."

@@ -162,7 +162,7 @@ class HubPushCallback(TrainerCallback):
         hub_model_id: str,
         revision: str,
         image_processor: RTDetrImageProcessor,
-        push_every_n_epochs: int = 5,
+        push_every_n_epochs: int = 50,
     ):
         self.hub_model_id = hub_model_id
         self.revision = revision
