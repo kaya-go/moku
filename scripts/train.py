@@ -71,6 +71,7 @@ class MAPEvalCallback(TrainerCallback):
         self.eval_dataset = eval_dataset
         self.image_processor = image_processor
         self.threshold = threshold
+        self.trainer: Trainer | None = None
 
     def on_epoch_begin(self, args, state, control, **kwargs):
         epoch = int(state.epoch) + 1 if state.epoch is not None else 1
@@ -141,6 +142,8 @@ class MAPEvalCallback(TrainerCallback):
         }
         if state.log_history:
             state.log_history[-1].update(map_metrics)
+        if self.trainer is not None:
+            self.trainer.log(map_metrics)
 
         print(
             f"  mAP@50:95={map_metrics['eval_map']:.4f}  mAP@50={map_metrics['eval_map_50']:.4f}  mAP@75={map_metrics['eval_map_75']:.4f}  mAR@400={map_metrics['eval_mar_400']:.4f}"
@@ -369,7 +372,9 @@ def main():
         logging_steps=10,
         remove_unused_columns=False,
         dataloader_num_workers=0,
-        fp16=torch.cuda.is_available() and not args.use_cpu,
+        fp16=False,
+        bf16=torch.cuda.is_available() and not args.use_cpu,
+        max_grad_norm=0.1,
         use_cpu=args.use_cpu,
         push_to_hub=False,
         report_to=report_to,
@@ -377,7 +382,8 @@ def main():
         run_name=args.run_name,
     )
 
-    callbacks = [MAPEvalCallback(dataset["validation"], image_processor)]
+    map_callback = MAPEvalCallback(dataset["validation"], image_processor)
+    callbacks = [map_callback]
     if args.push_to_hub:
         callbacks.append(HubPushCallback(HF_MODEL, hub_revision, image_processor))
 
@@ -389,6 +395,7 @@ def main():
         eval_dataset=dataset["validation"],
         callbacks=callbacks,
     )
+    map_callback.trainer = trainer
 
     print("Starting training...")
     if args.resume:
