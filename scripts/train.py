@@ -69,12 +69,24 @@ NUM_LABELS = len(CATEGORIES)
 
 
 class MAPEvalCallback(TrainerCallback):
-    """Compute COCO mAP on eval set after each evaluation and log to W&B."""
+    """Compute COCO mAP on eval set after each evaluation and log to W&B.
 
-    def __init__(self, eval_dataset, image_processor: RTDetrImageProcessor, threshold: float = 0.01):
+    When ``save_best_artifact`` is True, saves the best model (by mAP@50:95)
+    as a W&B artifact whenever a new best is reached.
+    """
+
+    def __init__(
+        self,
+        eval_dataset,
+        image_processor: RTDetrImageProcessor,
+        threshold: float = 0.01,
+        save_best_artifact: bool = False,
+    ):
         self.eval_dataset = eval_dataset
         self.image_processor = image_processor
         self.threshold = threshold
+        self.save_best_artifact = save_best_artifact
+        self.best_map: float = 0.0
         self.trainer: Trainer | None = None
 
     def on_epoch_begin(self, args, state, control, **kwargs):
@@ -153,6 +165,36 @@ class MAPEvalCallback(TrainerCallback):
         print(
             f"  mAP@50:95={map_metrics['eval_map']:.4f}  mAP@50={map_metrics['eval_map_50']:.4f}  mAP@75={map_metrics['eval_map_75']:.4f}  mAR@400={map_metrics['eval_mar_400']:.4f}"
         )
+
+        # Save best model as W&B artifact when mAP improves
+        if self.save_best_artifact and map_metrics["eval_map"] > self.best_map:
+            self.best_map = map_metrics["eval_map"]
+            print(f"  ★ New best mAP@50:95={self.best_map:.4f} — saving W&B artifact...")
+            self._save_artifact(model, epoch, map_metrics)
+
+    def _save_artifact(self, model, epoch: int, map_metrics: dict) -> None:
+        """Save model + image processor as a W&B artifact."""
+        import tempfile
+
+        import wandb
+
+        if wandb.run is None:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model.save_pretrained(tmpdir)
+            self.image_processor.save_pretrained(tmpdir)
+
+            artifact = wandb.Artifact(
+                name=f"model-{wandb.run.name}",
+                type="model",
+                metadata={
+                    "epoch": epoch,
+                    **{k: round(v, 6) for k, v in map_metrics.items()},
+                },
+            )
+            artifact.add_dir(tmpdir)
+            wandb.log_artifact(artifact)
 
 
 class HubPushCallback(TrainerCallback):
@@ -299,6 +341,11 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     p.add_argument("--round", type=str, default=None, help="Round label for W&B grouping (e.g. r4)")
+    p.add_argument(
+        "--no-save-best-artifact",
+        action="store_true",
+        help="Disable saving best model as W&B artifact (enabled by default when W&B is active)",
+    )
     return p.parse_args()
 
 
@@ -467,7 +514,11 @@ def main():
             resume="allow",
         )
 
-    map_callback = MAPEvalCallback(dataset["validation"], image_processor)
+    map_callback = MAPEvalCallback(
+        dataset["validation"],
+        image_processor,
+        save_best_artifact=(report_to == "wandb" and not args.no_save_best_artifact),
+    )
     callbacks = [map_callback]
     if args.push_to_hub:
         callbacks.append(HubPushCallback(HF_MODEL, hub_revision, image_processor))

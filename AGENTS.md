@@ -38,26 +38,37 @@ moku/
 │   └── progress.md            # Current progress and next steps
 ├── notebooks/
 │   ├── 01_Build_Dataset.ipynb # Dataset v1 creation and upload to HF
-│   ├── 01b_Build_Dataset_v2.ipynb # Dataset v2: corrected real + synthetic, upload to HF
-│   ├── 02_Train_Model.ipynb   # Model fine-tuning with HF Trainer
-│   ├── 03_Evaluate.ipynb      # Model evaluation, run comparison, HP tracking
-│   └── 04_Export_ONNX.ipynb   # ONNX export (future)
+│   ├── 02_Build_Dataset_v2.ipynb # Dataset v2: corrected real + synthetic
+│   ├── 03_Annotate.ipynb      # Corner annotation workflow
+│   ├── 04_Synthetic_Preview.ipynb # Synthetic data preview
+│   ├── 10_Train_Model.ipynb   # Model fine-tuning with HF Trainer
+│   ├── 20_Analyze_Runs.ipynb  # W&B run analysis (loss/mAP curves, ranking)
+│   ├── 21_Evaluate.ipynb      # Model evaluation v1 (deprecated)
+│   ├── 22_Evaluate_v2.ipynb   # Model evaluation v2 (mAP, center-distance)
+│   ├── 30_Publish_Model.ipynb # Select W&B artifact → push to HF Hub
+│   └── 40_Export_ONNX.ipynb   # ONNX export for browser inference
+├── scripts/
+│   ├── train.py               # Training script for HF Jobs (two-stage, W&B)
+│   └── launch_grid_r4.sh      # HP grid search launcher (round 4)
 ├── src/moku/
 │   ├── __init__.py
 │   ├── cli.py                 # CLI entry point
 │   ├── dataset.py             # Dataset loading and harmonization utilities
+│   ├── runs.py                # W&B run fetching, artifact management
 │   ├── training.py            # Training utilities (transforms, collate, mAP eval)
-│   └── viz.py                 # Visualization utilities
+│   └── viz/                   # Visualization utilities
 ├── pixi.toml
 └── pyproject.toml
 ```
 
 ## Pipeline Overview
 
-1. **Dataset** (`01_Build_Dataset.ipynb`): Harmonize raw COCO datasets into a single HF dataset (`kaya-go/moku-v1`) with unified categories.
-2. **Train** (`02_Train_Model.ipynb`): Fine-tune RT-DETR (r18vd) from `PekingU/rtdetr_r18vd` on the harmonized dataset.
-3. **Evaluate** (`03_Evaluate.ipynb`): Validate model with mAP metrics on test set.
-4. **Export** (`04_Export_ONNX.ipynb`): Convert to ONNX with dynamic axes for batch size. Publish to HF Hub.
+1. **Dataset** (`01_Build_Dataset.ipynb`, `02_Build_Dataset_v2.ipynb`): Harmonize raw COCO datasets into HF datasets (`kaya-go/moku-v1`, `kaya-go/moku-v2`).
+2. **Train** (`10_Train_Model.ipynb` + `scripts/train.py`): Fine-tune RT-DETR r18vd via HF Jobs. Two-stage: synthetic pre-train → real fine-tune. Best weights saved as W&B artifacts.
+3. **Analyze** (`20_Analyze_Runs.ipynb`): Fetch W&B run metrics, plot loss/mAP curves, rank runs.
+4. **Evaluate** (`22_Evaluate_v2.ipynb`): Validate model with mAP and center-distance metrics on test set. Supports loading from HF Hub branches or W&B artifacts.
+5. **Publish** (`30_Publish_Model.ipynb`): Select best W&B artifact and push to HF Hub as official model.
+6. **Export** (`40_Export_ONNX.ipynb`): Convert to ONNX with dynamic axes for batch size. Upload to HF Hub.
 
 ## Detection Categories
 

@@ -132,10 +132,14 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 
 **Observations**: v2 lr=2e-4 (50 epochs) trails v1 overall (0.338 vs 0.400 mAP), but board_corner AP improved significantly (0.318 vs 0.214) thanks to corrected corner annotations and synthetic pre-training. Stone detection dropped — likely due to too-short fine-tuning (50 epochs). Run 3 with 500 epochs should recover stone performance.
 
-- [x] Update `notebooks/02_Train_Model.ipynb` with two-stage training sections
+- [x] Update `notebooks/10_Train_Model.ipynb` with two-stage training sections
 - [x] Stage 1: pre-train on synthetic dataset
-- [ ] Stage 2: fine-tune on real dataset — run 3 with LR sweep (2e-4, 5e-4, 1e-3)
-- [ ] Optional: compare RT-DETR r34vd backbone — 2× params, same ONNX pipeline
+- [x] Stage 2: fine-tune on real dataset — run 3 with LR sweep (2e-4, 5e-4, 1e-3)
+- [x] Round 4: 10-run HP grid search (LR, scheduler, weight decay, combined strategies)
+- [x] W&B artifact saving for best model checkpoints (by mAP@50:95)
+- [x] `20_Analyze_Runs.ipynb`: W&B run analysis (loss/mAP curves, ranking)
+- [x] `30_Publish_Model.ipynb`: select W&B artifact → push to HF Hub
+- [ ] Round 5: next HP search round
 - [ ] Push best model as `kaya-go/moku-v2` on HF Hub
 
 ---
@@ -156,14 +160,17 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 
 | File | Change |
 |------|--------|
-| `src/moku/training.py` | Rewrite augmentation pipeline (albumentations) |
-| `src/moku/dataset.py` | Fix go-chess corners, add `build_dataset_v2()` |
-| `src/moku/synthetic.py` | Synthetic goban generator (done) |
+| `src/moku/training.py` | Augmentation pipeline (albumentations), mAP/center-distance eval |
+| `src/moku/runs.py` | W&B API utilities (fetch runs, artifacts, load models) |
+| `src/moku/dataset.py` | Fix go-chess corners, dataset harmonization |
+| `src/moku/synthetic.py` | Synthetic goban generator |
+| `scripts/train.py` | Two-stage training, W&B artifact saving |
 | `tools/annotator/` | HTML/JS annotator app |
-| `notebooks/03_Evaluate.ipynb` | Per-class mAP table |
-| `notebooks/01_Build_Dataset.ipynb` | v2 section |
-| `notebooks/02_Train_Model.ipynb` | Two-stage training |
-| `notebooks/05_Generate_Synthetic.ipynb` | Synthetic data generation |
+| `notebooks/10_Train_Model.ipynb` | Two-stage training (local test + HF Jobs) |
+| `notebooks/20_Analyze_Runs.ipynb` | W&B run analysis (loss/mAP curves) |
+| `notebooks/22_Evaluate_v2.ipynb` | mAP + center-distance eval (HF Hub or W&B artifacts) |
+| `notebooks/30_Publish_Model.ipynb` | Select W&B artifact → push to HF Hub |
+| `notebooks/40_Export_ONNX.ipynb` | ONNX export for browser inference |
 
 ---
 
@@ -187,3 +194,7 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 | 2026-03-14 | Minimal HP tuning: LR sweep only (3 values) at stage 2 | Stage 1 HP insensitive; stage 2 LR is the only critical HP; 3 runs sufficient |
 | 2026-03-14 | Run 1–2 LR sweeps under-performed v1 mAP (0.39) | Low LRs (1e-5 to 2e-4) and short training (50 epochs) insufficient |
 | 2026-03-14 | Run 3: higher LRs (2e-4, 5e-4, 1e-3) + 500 epochs | Trying stronger fine-tuning signal and longer training to recover v1 mAP |
+| 2026-03-15 | W&B artifact saving: best mAP@50:95 only | Direct quality metric; eval_loss is noisy proxy for DETR; one artifact per improvement |
+| 2026-03-15 | Replaced local `runs/` analysis with W&B API | Training on HF Jobs; no persistent local dir; W&B is source of truth |
+| 2026-03-15 | Notebook numbering: 0x=data, 1x=train, 2x=eval, 3x=publish, 4x=export | Clear section-based organization |
+| 2026-03-15 | Round 4: 10-run HP grid (LR, scheduler, weight decay) | Systematic exploration after r3 showed lr=1e-3 best; 200-epoch runs |

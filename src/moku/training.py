@@ -17,8 +17,8 @@ from moku.dataset import CATEGORIES, ID_TO_CATEGORY
 
 # Model & dataset identifiers
 BASE_MODEL = "PekingU/rtdetr_r18vd"
-HF_DATASET = "kaya-go/moku-v1"
-HF_MODEL = "kaya-go/moku-v1"
+HF_DATASET = "kaya-go/moku-v2"
+HF_MODEL = "kaya-go/moku-v2"
 NUM_LABELS = len(CATEGORIES)
 
 
@@ -580,7 +580,3 @@ def format_center_distance_results(metrics: dict) -> pd.DataFrame:
             row[f"F1@{dt_label}"] = dt_metrics["f1"]
         rows.append(row)
     return pd.DataFrame(rows)
-
-
-# Re-export from runs module for backward compatibility
-from moku.runs import load_training_runs, summarize_runs  # noqa: E402, F401
