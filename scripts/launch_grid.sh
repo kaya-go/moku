@@ -6,8 +6,8 @@
 #   bash scripts/launch_grid.sh stage1    # Stage 1 only (synthetic pre-train)
 #   bash scripts/launch_grid.sh stage2    # Stage 2 only (real fine-tune LR sweep)
 #
-# Logs to the same Trackio Space for comparison.
-# Compare results at: https://huggingface.co/spaces/kaya-go/moku-experiments
+# Logs to W&B for comparison.
+# Compare results at: https://wandb.ai/kaya-go/moku
 set -euo pipefail
 
 export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1

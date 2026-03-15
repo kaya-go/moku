@@ -28,7 +28,7 @@ export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
 FLAVOR="a10g-large"
 GROUP="${1:-all}"
 RUN_ID="run_4"
-SLEEP=3
+SLEEP=10
 
 launch() {
 	local run_name="$1"

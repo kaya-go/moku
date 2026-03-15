@@ -6,7 +6,7 @@
 #     "transformers>=5.2.0",
 #     "datasets>=4.6.0",
 #     "accelerate>=1.12.0",
-#     "trackio>=0.15.0",
+#     "wandb",
 #     "pycocotools>=2.0.11",
 #     "torchmetrics>=1.7.0",
 #     "faster-coco-eval>=1.7.0",
@@ -65,7 +65,7 @@ NUM_LABELS = len(CATEGORIES)
 
 
 class MAPEvalCallback(TrainerCallback):
-    """Compute COCO mAP on eval set after each evaluation and log to Trackio."""
+    """Compute COCO mAP on eval set after each evaluation and log to W&B."""
 
     def __init__(self, eval_dataset, image_processor: RTDetrImageProcessor, threshold: float = 0.01):
         self.eval_dataset = eval_dataset
@@ -133,7 +133,7 @@ class MAPEvalCallback(TrainerCallback):
 
         result = metric.compute()
 
-        # Log mAP metrics so they appear in Trackio
+        # Log mAP metrics so they appear in W&B
         map_metrics = {
             "eval_map": float(result.get("map", 0)),
             "eval_map_50": float(result.get("map_50", 0)),
@@ -292,7 +292,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="HF Hub branch to push to (default: stage1 for stage 1, main for stage 2)",
     )
-    p.add_argument("--no-trackio", action="store_true", help="Disable Trackio logging")
+    p.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
     return p.parse_args()
 
 
@@ -369,7 +369,7 @@ def main():
     dataset["validation"].set_transform(make_eval_transform(image_processor))
 
     # --- Training arguments ---
-    report_to = "none" if args.no_trackio else "trackio"
+    report_to = "none" if args.no_wandb else "wandb"
 
     # Parse lr_scheduler_kwargs if provided
     lr_scheduler_kwargs = None
@@ -404,7 +404,6 @@ def main():
         use_cpu=args.use_cpu,
         push_to_hub=False,
         report_to=report_to,
-        trackio_space_id="kaya-go/moku-experiments" if report_to == "trackio" else None,
         run_name=args.run_name,
     )
 

@@ -155,20 +155,6 @@ Self-contained training script for HF Jobs. Supports two-stage training (synthet
 
 Shell launcher for HF Jobs. Launches stage 1 and/or stage 2 LR sweep jobs.
 
-### `scripts/delete_runs.py`
+### `scripts/launch_grid_r4.sh`
 
-Delete specific training runs from the Trackio experiment logs stored in `kaya-go/moku-experiment-logs`.
-
-```bash
-# List all runs:
-pixi run python scripts/delete_runs.py
-
-# Delete specific runs by name:
-pixi run python scripts/delete_runs.py stage2_lr2e-4_run_3 stage2_lr5e-4_run_3
-
-# Delete runs matching a regex pattern:
-pixi run python scripts/delete_runs.py --pattern "run_3"
-
-# Delete ALL runs (full reset):
-pixi run python scripts/delete_runs.py --all
-```
+Round 4 hyperparameter search launcher (10 runs in 4 groups). Supports launching all runs or a specific group.
