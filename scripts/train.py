@@ -67,7 +67,7 @@ NUM_LABELS = len(CATEGORIES)
 class MAPEvalCallback(TrainerCallback):
     """Compute COCO mAP on eval set after each evaluation and log to Trackio."""
 
-    def __init__(self, eval_dataset, image_processor: RTDetrImageProcessor, threshold: float = 0.3):
+    def __init__(self, eval_dataset, image_processor: RTDetrImageProcessor, threshold: float = 0.01):
         self.eval_dataset = eval_dataset
         self.image_processor = image_processor
         self.threshold = threshold

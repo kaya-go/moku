@@ -322,37 +322,19 @@ def format_map_per_class(metrics: dict) -> pd.DataFrame:
 
 
 @torch.no_grad()
-def evaluate_center_distance(
+def _collect_raw_predictions(
     model: RTDetrForObjectDetection,
     dataset,
     image_processor: RTDetrImageProcessor,
     batch_size: int = 8,
-    threshold: float = 0.3,
-    distance_thresholds: list[float] | None = None,
     device: str | None = None,
-) -> dict:
-    """Evaluate detections using center-point distance instead of IoU.
+) -> list[dict]:
+    """Run inference once and return raw per-image prediction data.
 
-    For each image and class, predictions are matched to ground truth using
-    greedy nearest-center matching. A match is "correct" if the Euclidean
-    distance between predicted and GT bbox centers is below a threshold
-    (expressed as a fraction of the image diagonal).
-
-    Args:
-        distance_thresholds: Fractions of image diagonal to use as matching
-            thresholds.  Defaults to [0.01, 0.02, 0.05] (1%, 2%, 5%).
-
-    Returns a dict with:
-        - per_class: dict[class_name] -> {precision, recall, f1, mean_dist, median_dist}
-            at each distance threshold
-        - overall: aggregated across classes
-        - all_distances: list of all matched center distances (in pixels)
+    Returns a list of dicts, one per image, each with:
+        pred_scores, pred_labels, pred_centers (absolute),
+        gt_labels, gt_centers (absolute), img_diag.
     """
-    from scipy.optimize import linear_sum_assignment
-
-    if distance_thresholds is None:
-        distance_thresholds = [0.01, 0.02, 0.05]
-
     if device is None:
         if torch.backends.mps.is_available():
             device = "mps"
@@ -364,78 +346,97 @@ def evaluate_center_distance(
     model = model.to(device)
     model.eval()
 
-    # Collect all per-image, per-class matched distances
-    # Structure: class_id -> list of (gt_center, pred_center, distance, img_diag)
-    all_matches: dict[int, list[tuple[float, float]]] = {i: [] for i in ID_TO_CATEGORY}
-    # Track unmatched GT and preds per class
-    unmatched_gt: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
-    unmatched_pred: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
-
+    raw: list[dict] = []
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 
     for batch in dataloader:
         pixel_values = batch["pixel_values"].to(device)
         labels = batch["labels"]
-
         outputs = model(pixel_values=pixel_values)
-
         orig_sizes = torch.stack([lab["orig_size"] for lab in labels]).to(device)
-        results = image_processor.post_process_object_detection(outputs, target_sizes=orig_sizes, threshold=threshold)
+        # Use threshold=0 to keep all predictions
+        results = image_processor.post_process_object_detection(outputs, target_sizes=orig_sizes, threshold=0.0)
 
-        for i, (res, lab) in enumerate(zip(results, labels)):
+        for res, lab in zip(results, labels):
             orig_h, orig_w = lab["orig_size"]
             img_diag = float((orig_h**2 + orig_w**2) ** 0.5)
 
-            # Predicted boxes (xyxy) -> centers
             pred_boxes = res["boxes"].cpu()
+            pred_scores = res["scores"].cpu()
             pred_labels = res["labels"].cpu()
+            pred_cx = (pred_boxes[:, 0] + pred_boxes[:, 2]) / 2
+            pred_cy = (pred_boxes[:, 1] + pred_boxes[:, 3]) / 2
+            pred_centers = torch.stack([pred_cx, pred_cy], dim=-1) if pred_boxes.numel() > 0 else torch.zeros(0, 2)
 
-            # GT boxes (normalized cxcywh) -> absolute centers
             boxes_cxcywh = lab["boxes"]
             gt_cx = boxes_cxcywh[:, 0] * orig_w
             gt_cy = boxes_cxcywh[:, 1] * orig_h
+            gt_centers = torch.stack([gt_cx, gt_cy], dim=-1) if boxes_cxcywh.numel() > 0 else torch.zeros(0, 2)
             gt_labels = lab["class_labels"].cpu()
 
-            # Match per class
-            for cls_id in ID_TO_CATEGORY:
-                gt_mask = gt_labels == cls_id
-                pred_mask = pred_labels == cls_id
+            raw.append(
+                {
+                    "pred_scores": pred_scores,
+                    "pred_labels": pred_labels,
+                    "pred_centers": pred_centers,
+                    "gt_labels": gt_labels,
+                    "gt_centers": gt_centers,
+                    "img_diag": img_diag,
+                }
+            )
 
-                gt_centers = (
-                    torch.stack([gt_cx[gt_mask], gt_cy[gt_mask]], dim=-1) if gt_mask.any() else torch.zeros(0, 2)
-                )
-                pred_centers_xyxy = pred_boxes[pred_mask]
-                if pred_centers_xyxy.numel() > 0:
-                    pred_cx = (pred_centers_xyxy[:, 0] + pred_centers_xyxy[:, 2]) / 2
-                    pred_cy = (pred_centers_xyxy[:, 1] + pred_centers_xyxy[:, 3]) / 2
-                    p_centers = torch.stack([pred_cx, pred_cy], dim=-1)
-                else:
-                    p_centers = torch.zeros(0, 2)
+    return raw
 
-                n_gt = gt_centers.shape[0]
-                n_pred = p_centers.shape[0]
 
-                if n_gt == 0:
-                    unmatched_pred[cls_id] += n_pred
-                    continue
-                if n_pred == 0:
-                    unmatched_gt[cls_id] += n_gt
-                    continue
+def _compute_cd_metrics(
+    raw: list[dict],
+    score_threshold: float,
+    distance_thresholds: list[float],
+) -> dict:
+    """Compute center-distance P/R/F1 from raw predictions at a given score threshold."""
+    from scipy.optimize import linear_sum_assignment
 
-                # Cost matrix: Euclidean distance between all pairs
-                cost = torch.cdist(gt_centers.float(), p_centers.float())  # (n_gt, n_pred)
-                gt_idx, pred_idx = linear_sum_assignment(cost.numpy())
+    all_matches: dict[int, list[tuple[float, float]]] = {i: [] for i in ID_TO_CATEGORY}
+    unmatched_gt: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
+    unmatched_pred: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
 
-                matched = 0
-                for gi, pi in zip(gt_idx, pred_idx):
-                    dist = float(cost[gi, pi])
-                    all_matches[cls_id].append((dist, img_diag))
-                    matched += 1
+    for img in raw:
+        score_mask = img["pred_scores"] >= score_threshold
+        pred_labels = img["pred_labels"][score_mask]
+        pred_centers = img["pred_centers"][score_mask]
+        gt_labels = img["gt_labels"]
+        gt_centers = img["gt_centers"]
+        img_diag = img["img_diag"]
 
-                unmatched_gt[cls_id] += n_gt - matched
-                unmatched_pred[cls_id] += n_pred - matched
+        for cls_id in ID_TO_CATEGORY:
+            gt_mask = gt_labels == cls_id
+            pred_mask = pred_labels == cls_id
 
-    # Compute metrics at each distance threshold
+            g_centers = gt_centers[gt_mask] if gt_mask.any() else torch.zeros(0, 2)
+            p_centers = pred_centers[pred_mask] if pred_mask.any() else torch.zeros(0, 2)
+
+            n_gt = g_centers.shape[0]
+            n_pred = p_centers.shape[0]
+
+            if n_gt == 0:
+                unmatched_pred[cls_id] += n_pred
+                continue
+            if n_pred == 0:
+                unmatched_gt[cls_id] += n_gt
+                continue
+
+            cost = torch.cdist(g_centers.float(), p_centers.float())
+            gt_idx, pred_idx = linear_sum_assignment(cost.numpy())
+
+            matched = 0
+            for gi, pi in zip(gt_idx, pred_idx):
+                dist = float(cost[gi, pi])
+                all_matches[cls_id].append((dist, img_diag))
+                matched += 1
+
+            unmatched_gt[cls_id] += n_gt - matched
+            unmatched_pred[cls_id] += n_pred - matched
+
     per_class: dict[str, dict] = {}
     for cls_id, name in ID_TO_CATEGORY.items():
         matches = all_matches[cls_id]
@@ -466,6 +467,101 @@ def evaluate_center_distance(
     return {"per_class": per_class, "distance_thresholds": distance_thresholds}
 
 
+@torch.no_grad()
+def evaluate_center_distance(
+    model: RTDetrForObjectDetection,
+    dataset,
+    image_processor: RTDetrImageProcessor,
+    batch_size: int = 8,
+    threshold: float = 0.3,
+    distance_thresholds: list[float] | None = None,
+    device: str | None = None,
+) -> dict:
+    """Evaluate detections using center-point distance instead of IoU.
+
+    For each image and class, predictions are matched to ground truth using
+    greedy nearest-center matching. A match is "correct" if the Euclidean
+    distance between predicted and GT bbox centers is below a threshold
+    (expressed as a fraction of the image diagonal).
+
+    Args:
+        distance_thresholds: Fractions of image diagonal to use as matching
+            thresholds.  Defaults to [0.01, 0.02, 0.05] (1%, 2%, 5%).
+
+    Returns a dict with:
+        - per_class: dict[class_name] -> {precision, recall, f1, mean_dist, median_dist}
+            at each distance threshold
+    """
+    if distance_thresholds is None:
+        distance_thresholds = [0.01, 0.02, 0.05]
+
+    raw = _collect_raw_predictions(model, dataset, image_processor, batch_size, device)
+    return _compute_cd_metrics(raw, threshold, distance_thresholds)
+
+
+@torch.no_grad()
+def sweep_confidence_threshold(
+    model: RTDetrForObjectDetection,
+    dataset,
+    image_processor: RTDetrImageProcessor,
+    batch_size: int = 8,
+    distance_threshold: float = 0.02,
+    score_thresholds: list[float] | None = None,
+    device: str | None = None,
+) -> dict:
+    """Sweep confidence thresholds and compute center-distance P/R/F1 at each.
+
+    Runs inference once, then evaluates at each score threshold.
+
+    Args:
+        distance_threshold: Single distance threshold (fraction of diagonal)
+            used for matching.  Defaults to 0.02 (2%).
+        score_thresholds: Confidence thresholds to sweep.  Defaults to
+            ``np.arange(0.01, 1.0, 0.01)``.
+
+    Returns a dict with:
+        - score_thresholds: list of swept thresholds
+        - per_class: dict[class_name] -> dict with P/R/F1 arrays
+        - macro: dict with macro-averaged P/R/F1 arrays
+    """
+    if score_thresholds is None:
+        score_thresholds = np.arange(0.01, 1.0, 0.01).tolist()
+
+    raw = _collect_raw_predictions(model, dataset, image_processor, batch_size, device)
+
+    per_class: dict[str, dict[str, list[float]]] = {
+        name: {"precision": [], "recall": [], "f1": []} for name in ID_TO_CATEGORY.values()
+    }
+
+    dt_label = f"{distance_threshold:.0%}"
+    for st in score_thresholds:
+        cd = _compute_cd_metrics(raw, st, [distance_threshold])
+        for name in ID_TO_CATEGORY.values():
+            t = cd["per_class"][name]["thresholds"][dt_label]
+            per_class[name]["precision"].append(t["precision"])
+            per_class[name]["recall"].append(t["recall"])
+            per_class[name]["f1"].append(t["f1"])
+
+    # Macro average
+    class_names = list(ID_TO_CATEGORY.values())
+    macro = {
+        "precision": [
+            float(np.mean([per_class[c]["precision"][i] for c in class_names])) for i in range(len(score_thresholds))
+        ],
+        "recall": [
+            float(np.mean([per_class[c]["recall"][i] for c in class_names])) for i in range(len(score_thresholds))
+        ],
+        "f1": [float(np.mean([per_class[c]["f1"][i] for c in class_names])) for i in range(len(score_thresholds))],
+    }
+
+    return {
+        "score_thresholds": score_thresholds,
+        "distance_threshold": distance_threshold,
+        "per_class": per_class,
+        "macro": macro,
+    }
+
+
 def format_center_distance_results(metrics: dict) -> pd.DataFrame:
     """Format center-distance evaluation results as a DataFrame."""
     rows = []
@@ -486,48 +582,5 @@ def format_center_distance_results(metrics: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_training_runs(runs_dir: str | Path) -> pd.DataFrame:
-    """Load trainer log history from all runs in a directory.
-
-    Expects each sub-directory to contain a ``trainer_state.json``.
-    Returns a DataFrame with a ``run`` column identifying each run.
-    """
-    runs_dir = Path(runs_dir)
-    rows: list[dict] = []
-    for state_file in sorted(runs_dir.glob("*/trainer_state.json")):
-        run_name = state_file.parent.name
-        with open(state_file) as f:
-            state = json.load(f)
-        for entry in state.get("log_history", []):
-            rows.append({"run": run_name, **entry})
-    return pd.DataFrame(rows)
-
-
-def summarize_runs(runs_dir: str | Path) -> pd.DataFrame:
-    """Summarize final eval metrics for each run in a directory.
-
-    Returns one row per run with the last recorded eval_loss and training config.
-    """
-    runs_dir = Path(runs_dir)
-    summaries: list[dict] = []
-    for state_file in sorted(runs_dir.glob("*/trainer_state.json")):
-        run_name = state_file.parent.name
-        with open(state_file) as f:
-            state = json.load(f)
-        # Extract last eval entry
-        eval_entries = [e for e in state.get("log_history", []) if "eval_loss" in e]
-        last_eval = eval_entries[-1] if eval_entries else {}
-        # Extract training args
-        args_file = state_file.parent / "training_args.bin"
-        config: dict = {"run": run_name}
-        # Read args from config.json if available
-        config_file = state_file.parent / "config.json"
-        if config_file.exists():
-            with open(config_file) as f:
-                cfg = json.load(f)
-            config.update({k: cfg[k] for k in ["num_labels"] if k in cfg})
-        config["eval_loss"] = last_eval.get("eval_loss")
-        config["epoch"] = last_eval.get("epoch")
-        config["step"] = last_eval.get("step")
-        summaries.append(config)
-    return pd.DataFrame(summaries)
+# Re-export from runs module for backward compatibility
+from moku.runs import load_training_runs, summarize_runs  # noqa: E402, F401
