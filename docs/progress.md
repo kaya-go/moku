@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Phase**: Dataset v2 & Model v2 planning
+**Phase**: Model v2 training — Round 6 in progress
 
 ## v1 Results
 
@@ -139,8 +139,42 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 - [x] W&B artifact saving for best model checkpoints (by mAP@50:95)
 - [x] `20_Analyze_Runs.ipynb`: W&B run analysis (loss/mAP curves, ranking)
 - [x] `30_Publish_Model.ipynb`: select W&B artifact → push to HF Hub
-- [ ] Round 5: next HP search round
+- [x] Round 5: LR + scheduler sweep (6 runs, 500 epochs, with fixed augmentation)
+- [ ] Round 6: long training sweep (4 runs, 1000 epochs) — in progress
 - [ ] Push best model as `kaya-go/moku-v2` on HF Hub
+
+### Round 5 Results (6 runs, 500 epochs)
+
+**Config**: LR {2e-4, 3e-4, 4e-4, 5e-4} × scheduler {linear, cosine}, batch 32, fixed albumentations augmentation.
+
+| Run | LR | Scheduler | Best mAP@50:95 | Best Epoch | Mean mAP (last 100) |
+|-----|----|-----------|---------------|------------|---------------------|
+| r5_lr4e-4_linear500 | 4e-4 | linear | **0.6075** | 413 | 0.5092 |
+| r5_lr3e-4_cos500 | 3e-4 | cosine | 0.5841 | 318 | **0.5365** |
+| r5_lr5e-4_linear500 | 5e-4 | linear | 0.5742 | 369 | 0.4933 |
+| r5_lr2e-4_cos500 | 2e-4 | cosine | 0.5577 | 354 | 0.5043 |
+| r5_lr5e-4_cos500 | 5e-4 | cosine | 0.5355 | 180 | 0.4173 |
+| r5_lr2e-4_linear500 | 2e-4 | linear | 0.5280 | 410 | 0.4889 |
+
+**Key findings**:
+- Best raw mAP: lr=4e-4 + linear (0.6075), but noisy/spiky eval curve
+- Best smoothed/mean mAP: lr=3e-4 + cosine — higher average performance across all 100-epoch windows
+- Linear schedule generally outperforms cosine on long runs (cosine kills LR too early)
+- Augmentation (fixed in R5) significantly improved over R4
+- Best runs still improving at epoch 400-500 → not plateaued, longer training warranted
+
+### Round 6 Plan (4 runs, 1000 epochs) — in progress
+
+**Goal**: Double training length to find true plateau; combine best LRs with improved scheduler.
+
+| Run | LR | Scheduler | Epochs |
+|-----|----|-----------|--------|
+| r6_lr4e-4_linear1000 | 4e-4 | linear | 1000 |
+| r6_lr3e-4_linear1000 | 3e-4 | linear | 1000 |
+| r6_lr4e-4_cosmin1000 | 4e-4 | cosine_with_min_lr (min=5e-5) | 1000 |
+| r6_lr3e-4_cosmin1000 | 3e-4 | cosine_with_min_lr (min=5e-5) | 1000 |
+
+**Rationale**: lr=3e-4 included because smoothed analysis showed it competitive with 4e-4. `cosine_with_min_lr` avoids the LR=0 problem of plain cosine while maintaining the annealing benefit.
 
 ---
 
@@ -198,3 +232,8 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 | 2026-03-15 | Replaced local `runs/` analysis with W&B API | Training on HF Jobs; no persistent local dir; W&B is source of truth |
 | 2026-03-15 | Notebook numbering: 0x=data, 1x=train, 2x=eval, 3x=publish, 4x=export | Clear section-based organization |
 | 2026-03-15 | Round 4: 10-run HP grid (LR, scheduler, weight decay) | Systematic exploration after r3 showed lr=1e-3 best; 200-epoch runs |
+| 2026-03-16 | Round 5: LR × scheduler sweep, 500 epochs | Fixed augmentation (R4 had buggy albumentations); 6 runs to find best LR+scheduler combo |
+| 2026-03-16 | Round 6: 1000 epochs, 4 runs, cosine_with_min_lr scheduler | R5 not plateaued at 500; plain cosine kills LR too early; cosine_with_min_lr (min=5e-5) keeps a floor |
+| 2026-03-16 | Include lr=3e-4 in R6 grid | EMA-smoothed analysis showed r5_lr3e-4_cos had higher mean mAP than lr=4e-4 despite lower raw max |
+| 2026-03-16 | Keep batch_size=32 (not 64) | 382 train images / 64 = 6 steps/epoch — too few for stable gradient estimation |
+| 2026-03-16 | Create `scripts/analyze_runs.py` | Reusable W&B analysis with EMA smoothing and plateau detection; replaces ad-hoc notebook/scripts |

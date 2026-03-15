@@ -48,8 +48,10 @@ moku/
 │   └── 40_Export_ONNX.ipynb   # ONNX export for browser inference
 ├── scripts/
 │   ├── train.py               # Training script for HF Jobs (two-stage, W&B)
+│   ├── analyze_runs.py        # Reusable W&B run analysis (EMA, plateau)
 │   ├── launch_grid_r4.sh      # HP grid search launcher (round 4)
-│   └── launch_grid_r5.sh      # HP grid search launcher (round 5)
+│   ├── launch_grid_r5.sh      # HP grid search launcher (round 5)
+│   └── launch_grid_r6.sh      # HP grid search launcher (round 6)
 ├── src/moku/
 │   ├── __init__.py
 │   ├── cli.py                 # CLI entry point

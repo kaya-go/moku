@@ -162,13 +162,13 @@ def plot_center_distance_comparison(
 def plot_threshold_sweep(
     sweep: dict,
     title: str = "Confidence Threshold Sweep",
-    figsize: tuple[float, float] = (14, 4),
+    figsize: tuple[float, float] | None = None,
 ) -> None:
     """Plot P/R/F1 and mAP vs confidence threshold from ``sweep_confidence_threshold``.
 
-    Left plot: macro-averaged P/R/F1 with optimal threshold marked.
-    Center plot: per-class F1 curves.
-    Right plot: mAP@50:95 and mAP@50 vs threshold (if present in sweep).
+    Top plot: macro-averaged P/R/F1 with optimal threshold marked.
+    Middle plot: per-class F1 curves.
+    Bottom plot: mAP@50:95 and mAP@50 vs threshold (if present in sweep).
     """
     thresholds = sweep["score_thresholds"]
     dt = sweep["distance_threshold"]
@@ -177,8 +177,10 @@ def plot_threshold_sweep(
     class_names = list(per_class.keys())
     has_map = "map" in sweep and "map_50" in sweep
 
-    ncols = 3 if has_map else 2
-    fig, axes = plt.subplots(1, ncols, figsize=figsize)
+    nrows = 3 if has_map else 2
+    if figsize is None:
+        figsize = (10, 4 * nrows)
+    fig, axes = plt.subplots(nrows, 1, figsize=figsize)
 
     # --- Left: Macro P/R/F1 ---
     axes[0].plot(thresholds, macro["precision"], label="Precision", linewidth=2)
