@@ -162,20 +162,23 @@ def plot_center_distance_comparison(
 def plot_threshold_sweep(
     sweep: dict,
     title: str = "Confidence Threshold Sweep",
-    figsize: tuple[float, float] = (10, 4),
+    figsize: tuple[float, float] = (14, 4),
 ) -> None:
-    """Plot P/R/F1 vs confidence threshold from ``sweep_confidence_threshold``.
+    """Plot P/R/F1 and mAP vs confidence threshold from ``sweep_confidence_threshold``.
 
     Left plot: macro-averaged P/R/F1 with optimal threshold marked.
-    Right plot: per-class F1 curves.
+    Center plot: per-class F1 curves.
+    Right plot: mAP@50:95 and mAP@50 vs threshold (if present in sweep).
     """
     thresholds = sweep["score_thresholds"]
     dt = sweep["distance_threshold"]
     macro = sweep["macro"]
     per_class = sweep["per_class"]
     class_names = list(per_class.keys())
+    has_map = "map" in sweep and "map_50" in sweep
 
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    ncols = 3 if has_map else 2
+    fig, axes = plt.subplots(1, ncols, figsize=figsize)
 
     # --- Left: Macro P/R/F1 ---
     axes[0].plot(thresholds, macro["precision"], label="Precision", linewidth=2)
@@ -204,7 +207,7 @@ def plot_threshold_sweep(
     axes[0].legend(fontsize=9)
     axes[0].grid(alpha=0.3)
 
-    # --- Right: Per-class F1 ---
+    # --- Center: Per-class F1 ---
     colors_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
     for j, name in enumerate(class_names):
         color = colors_cycle[j % len(colors_cycle)]
@@ -231,6 +234,33 @@ def plot_threshold_sweep(
     axes[1].set_title(f"{title} — Per-Class F1 (dist≤{dt:.0%})")
     axes[1].legend(fontsize=9)
     axes[1].grid(alpha=0.3)
+
+    # --- Right: mAP vs threshold ---
+    if has_map:
+        axes[2].plot(thresholds, sweep["map"], label="mAP@50:95", linewidth=2, color="#1b9e77")
+        axes[2].plot(thresholds, sweep["map_50"], label="mAP@50", linewidth=2, color="#d95f02")
+
+        best_map_idx = int(np.argmax(sweep["map"]))
+        best_map_t = thresholds[best_map_idx]
+        best_map_v = sweep["map"][best_map_idx]
+        axes[2].axvline(best_map_t, color="red", linestyle="--", alpha=0.7)
+        axes[2].plot(best_map_t, best_map_v, "ro", markersize=8)
+        axes[2].annotate(
+            f"best={best_map_t:.2f}\nmAP={best_map_v:.3f}",
+            xy=(best_map_t, best_map_v),
+            xytext=(10, -20),
+            textcoords="offset points",
+            fontsize=9,
+            color="red",
+        )
+
+        axes[2].set_xlabel("Confidence Threshold")
+        axes[2].set_ylabel("mAP")
+        axes[2].set_ylim(0, 1.05)
+        axes[2].set_xlim(0, 0.5)
+        axes[2].set_title(f"{title} — mAP")
+        axes[2].legend(fontsize=9)
+        axes[2].grid(alpha=0.3)
 
     plt.tight_layout()
     plt.show()

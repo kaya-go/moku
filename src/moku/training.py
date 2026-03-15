@@ -218,10 +218,12 @@ def evaluate_map(
     dataset,
     image_processor: RTDetrImageProcessor,
     batch_size: int = 8,
-    threshold: float = 0.3,
     device: str | None = None,
 ) -> dict:
     """Compute COCO mAP metrics on a dataset.
+
+    All predictions are kept (threshold=0) so that mAP is computed in a
+    threshold-free manner as intended by the COCO evaluation protocol.
 
     Returns a dict with map, map_50, map_75, mar_100, and per-class AP.
     """
@@ -259,7 +261,7 @@ def evaluate_map(
 
         # Post-process predictions to absolute xyxy coordinates
         orig_sizes = torch.stack([lab["orig_size"] for lab in labels]).to(device)
-        results = image_processor.post_process_object_detection(outputs, target_sizes=orig_sizes, threshold=threshold)
+        results = image_processor.post_process_object_detection(outputs, target_sizes=orig_sizes, threshold=0.0)
 
         preds = [{"boxes": r["boxes"].cpu(), "scores": r["scores"].cpu(), "labels": r["labels"].cpu()} for r in results]
 
@@ -329,12 +331,7 @@ def _collect_raw_predictions(
     batch_size: int = 8,
     device: str | None = None,
 ) -> list[dict]:
-    """Run inference once and return raw per-image prediction data.
-
-    Returns a list of dicts, one per image, each with:
-        pred_scores, pred_labels, pred_centers (absolute),
-        gt_labels, gt_centers (absolute), img_diag.
-    """
+    """Run inference once and return raw per-image prediction data."""
     if device is None:
         if torch.backends.mps.is_available():
             device = "mps"
@@ -369,16 +366,27 @@ def _collect_raw_predictions(
             pred_centers = torch.stack([pred_cx, pred_cy], dim=-1) if pred_boxes.numel() > 0 else torch.zeros(0, 2)
 
             boxes_cxcywh = lab["boxes"]
-            gt_cx = boxes_cxcywh[:, 0] * orig_w
-            gt_cy = boxes_cxcywh[:, 1] * orig_h
+            cx, cy, w, h = boxes_cxcywh.unbind(-1) if boxes_cxcywh.numel() > 0 else (torch.zeros(0),) * 4
+            gt_cx = cx * orig_w
+            gt_cy = cy * orig_h
             gt_centers = torch.stack([gt_cx, gt_cy], dim=-1) if boxes_cxcywh.numel() > 0 else torch.zeros(0, 2)
+            gt_boxes_xyxy = (
+                torch.stack(
+                    [(cx - w / 2) * orig_w, (cy - h / 2) * orig_h, (cx + w / 2) * orig_w, (cy + h / 2) * orig_h],
+                    dim=-1,
+                )
+                if boxes_cxcywh.numel() > 0
+                else torch.zeros(0, 4)
+            )
             gt_labels = lab["class_labels"].cpu()
 
             raw.append(
                 {
+                    "pred_boxes": pred_boxes,
                     "pred_scores": pred_scores,
                     "pred_labels": pred_labels,
                     "pred_centers": pred_centers,
+                    "gt_boxes": gt_boxes_xyxy.cpu(),
                     "gt_labels": gt_labels,
                     "gt_centers": gt_centers,
                     "img_diag": img_diag,
@@ -509,21 +517,13 @@ def sweep_confidence_threshold(
     score_thresholds: list[float] | None = None,
     device: str | None = None,
 ) -> dict:
-    """Sweep confidence thresholds and compute center-distance P/R/F1 at each.
+    """Sweep confidence thresholds and compute center-distance P/R/F1 and mAP.
 
     Runs inference once, then evaluates at each score threshold.
-
-    Args:
-        distance_threshold: Single distance threshold (fraction of diagonal)
-            used for matching.  Defaults to 0.02 (2%).
-        score_thresholds: Confidence thresholds to sweep.  Defaults to
-            ``np.arange(0.01, 1.0, 0.01)``.
-
-    Returns a dict with:
-        - score_thresholds: list of swept thresholds
-        - per_class: dict[class_name] -> dict with P/R/F1 arrays
-        - macro: dict with macro-averaged P/R/F1 arrays
+    Returns score_thresholds, per_class P/R/F1, macro P/R/F1, map, map_50.
     """
+    from torchmetrics.detection import MeanAveragePrecision
+
     if score_thresholds is None:
         score_thresholds = np.arange(0.01, 1.0, 0.01).tolist()
 
@@ -532,6 +532,8 @@ def sweep_confidence_threshold(
     per_class: dict[str, dict[str, list[float]]] = {
         name: {"precision": [], "recall": [], "f1": []} for name in ID_TO_CATEGORY.values()
     }
+    map_values: list[float] = []
+    map_50_values: list[float] = []
 
     dt_label = f"{distance_threshold:.0%}"
     for st in score_thresholds:
@@ -541,6 +543,26 @@ def sweep_confidence_threshold(
             per_class[name]["precision"].append(t["precision"])
             per_class[name]["recall"].append(t["recall"])
             per_class[name]["f1"].append(t["f1"])
+
+        metric = MeanAveragePrecision(
+            box_format="xyxy",
+            iou_type="bbox",
+            max_detection_thresholds=[1, 10, 400],
+            backend="faster_coco_eval",
+        )
+        for img in raw:
+            mask = img["pred_scores"] >= st
+            preds = [
+                {
+                    "boxes": img["pred_boxes"][mask],
+                    "scores": img["pred_scores"][mask],
+                    "labels": img["pred_labels"][mask],
+                }
+            ]
+            metric.update(preds, [{"boxes": img["gt_boxes"], "labels": img["gt_labels"]}])
+        result = metric.compute()
+        map_values.append(float(result["map"]))
+        map_50_values.append(float(result["map_50"]))
 
     # Macro average
     class_names = list(ID_TO_CATEGORY.values())
@@ -559,6 +581,8 @@ def sweep_confidence_threshold(
         "distance_threshold": distance_threshold,
         "per_class": per_class,
         "macro": macro,
+        "map": map_values,
+        "map_50": map_50_values,
     }
 
 
