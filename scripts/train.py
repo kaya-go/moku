@@ -138,11 +138,12 @@ class MAPEvalCallback(TrainerCallback):
         result = metric.compute()
 
         # Log mAP metrics so they appear in W&B
+        # Use eval_ prefix so Trainer's WandbCallback maps them to eval/ section
         map_metrics = {
-            "eval/map": float(result.get("map", 0)),
-            "eval/map_50": float(result.get("map_50", 0)),
-            "eval/map_75": float(result.get("map_75", 0)),
-            "eval/mar_400": float(result.get("mar_400", 0)),
+            "eval_map": float(result.get("map", 0)),
+            "eval_map_50": float(result.get("map_50", 0)),
+            "eval_map_75": float(result.get("map_75", 0)),
+            "eval_mar_400": float(result.get("mar_400", 0)),
         }
         if state.log_history:
             state.log_history[-1].update(map_metrics)
@@ -150,7 +151,7 @@ class MAPEvalCallback(TrainerCallback):
             self.trainer.log(map_metrics)
 
         print(
-            f"  mAP@50:95={map_metrics['eval/map']:.4f}  mAP@50={map_metrics['eval/map_50']:.4f}  mAP@75={map_metrics['eval/map_75']:.4f}  mAR@400={map_metrics['eval/mar_400']:.4f}"
+            f"  mAP@50:95={map_metrics['eval_map']:.4f}  mAP@50={map_metrics['eval_map_50']:.4f}  mAP@75={map_metrics['eval_map_75']:.4f}  mAR@400={map_metrics['eval_mar_400']:.4f}"
         )
 
 
