@@ -37,7 +37,7 @@
 - [x] Set up project structure with `src/moku/` library and notebooks
 - [x] Created documentation (AGENTS.md, docs/)
 - [x] Built dataset harmonization code in `src/moku/dataset.py`
-- [x] Created training utilities in `src/moku/training.py`
+- [x] Created training utilities in `src/moku/model.py`
 - [x] Created `01_Build_Dataset.ipynb` — built and pushed `kaya-go/moku-v1`
 - [x] Created `02_Train_Model.ipynb` — baseline + HP grid search training
 - [x] Created `03_Evaluate.ipynb` — mAP evaluation, prediction visualization, run comparison
@@ -69,7 +69,7 @@
 ### Phase 2 — Aggressive Augmentation
 
 - [x] `pixi add albumentations`
-- [x] Rewrite transforms in `src/moku/training.py` using albumentations:
+- [x] Rewrite transforms in `scripts/train.py` using albumentations:
   - **Geometric**: `Perspective` (most impactful for corners), `Rotate` (±15°), `HorizontalFlip`, `VerticalFlip`, `RandomResizedCrop`
   - **Photometric**: `ColorJitter`, `RandomGamma`, `GaussianBlur`, `MotionBlur`, `RandomShadow`
   - Bbox conversion handled natively by albumentations COCO format with min_area/min_visibility filtering
@@ -160,7 +160,7 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 
 | File | Change |
 |------|--------|
-| `src/moku/training.py` | Augmentation pipeline (albumentations), mAP/center-distance eval |
+| `src/moku/model.py` | Model loading, eval transforms, collation utilities |
 | `src/moku/runs.py` | W&B API utilities (fetch runs, artifacts, load models) |
 | `src/moku/dataset.py` | Fix go-chess corners, dataset harmonization |
 | `src/moku/synthetic.py` | Synthetic goban generator |

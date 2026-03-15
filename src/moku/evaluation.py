@@ -8,7 +8,7 @@ import torch
 from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
 
 from moku.dataset import ID_TO_CATEGORY
-from moku.training import collate_fn
+from moku.model import collate_fn
 
 
 @torch.no_grad()

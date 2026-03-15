@@ -12,6 +12,8 @@
 #     "faster-coco-eval>=1.7.0",
 #     "scipy",
 #     "huggingface_hub>=1.5.0",
+#     "albumentations>=1.4.20",
+#     "numpy",
 # ]
 # ///
 """Fine-tune RT-DETR r18vd on kaya-go/moku-v2 dataset.
@@ -41,9 +43,10 @@ from __future__ import annotations
 
 import argparse
 import os
-import random
 import sys
 
+import albumentations as A
+import numpy as np
 import torch
 from datasets import load_dataset
 from PIL import Image
@@ -229,7 +232,7 @@ class HubPushCallback(TrainerCallback):
 
 
 # ---------------------------------------------------------------------------
-# Data helpers (inlined from moku.training / moku.dataset)
+# Data helpers (inlined from moku.model / moku.dataset)
 # ---------------------------------------------------------------------------
 def _build_coco_target(example: dict) -> dict:
     return {
@@ -259,22 +262,96 @@ def _unbatch_example(example: dict) -> dict:
     return example
 
 
-def _flip_horizontal(image: Image.Image, annotations: list[dict]) -> tuple[Image.Image, list[dict]]:
-    image = image.transpose(Image.FLIP_LEFT_RIGHT)
-    w = image.width
-    for ann in annotations:
-        x, y, bw, bh = ann["bbox"]
-        ann["bbox"] = [w - x - bw, y, bw, bh]
-    return image, annotations
+# ---------------------------------------------------------------------------
+# Albumentations augmentation pipeline
+# ---------------------------------------------------------------------------
+def _build_train_augmentation() -> A.Compose:
+    """Aggressive augmentation for small dataset: phone angles, lighting, noise."""
+    return A.Compose(
+        [
+            # ── Geometric (phone angles, partial views) ──
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.3),
+            A.Perspective(scale=(0.03, 0.12), p=0.6),
+            A.Rotate(limit=30, border_mode=0, p=0.5),
+            A.RandomResizedCrop(
+                size=(640, 640),
+                scale=(0.5, 1.0),
+                ratio=(0.75, 1.33),
+                p=0.5,
+            ),
+            # ── Photometric (variable lighting) ──
+            A.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.08, p=0.6),
+            A.RandomGamma(gamma_limit=(70, 130), p=0.3),
+            A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.2),
+            # ── Blur & noise (mobile camera) ──
+            A.OneOf(
+                [
+                    A.GaussianBlur(blur_limit=(3, 7), p=1.0),
+                    A.MotionBlur(blur_limit=(3, 9), p=1.0),
+                ],
+                p=0.4,
+            ),
+            A.GaussNoise(var_limit=(26.0, 416.0), p=0.3),
+            # ── Shadows & occlusion (real lighting) ──
+            A.RandomShadow(
+                num_shadows_lower=1,
+                num_shadows_upper=3,
+                shadow_dimension=5,
+                shadow_roi=(0, 0, 1, 1),
+                p=0.3,
+            ),
+            # ── Compression artifacts (JPEG from phones) ──
+            A.ImageCompression(quality_range=(40, 95), p=0.3),
+            A.Downscale(scale_range=(0.5, 0.9), p=0.2),
+        ],
+        bbox_params=A.BboxParams(
+            format="coco",
+            label_fields=["category_ids"],
+            min_area=1.0,
+            min_visibility=0.3,
+        ),
+    )
 
 
-def make_train_transform(image_processor: RTDetrImageProcessor, flip_p: float = 0.5):
+def _apply_augmentation(
+    image: Image.Image,
+    annotations: list[dict],
+    aug: A.Compose,
+) -> tuple[Image.Image, list[dict]]:
+    """Apply albumentations augmentation to image and COCO annotations."""
+    img_np = np.array(image)
+    bboxes = [ann["bbox"] for ann in annotations]
+    category_ids = [ann["category_id"] for ann in annotations]
+
+    result = aug(image=img_np, bboxes=bboxes, category_ids=category_ids)
+
+    aug_image = Image.fromarray(result["image"])
+
+    aug_annotations = []
+    for bbox, cat_id in zip(result["bboxes"], result["category_ids"]):
+        x, y, w, h = bbox
+        aug_annotations.append(
+            {
+                "id": 0,
+                "category_id": int(cat_id),
+                "bbox": [float(x), float(y), float(w), float(h)],
+                "area": float(w * h),
+                "iscrowd": 0,
+            }
+        )
+
+    return aug_image, aug_annotations
+
+
+def make_train_transform(image_processor: RTDetrImageProcessor):
+    aug = _build_train_augmentation()
+
     def transform(example: dict) -> dict:
         example = _unbatch_example(example)
         image = example["image"].convert("RGB")
         target = _build_coco_target(example)
-        if random.random() < flip_p:
-            image, target["annotations"] = _flip_horizontal(image, target["annotations"])
+        image, target["annotations"] = _apply_augmentation(image, target["annotations"], aug)
         return image_processor(images=[image], annotations=[target], return_tensors="pt")
 
     return transform

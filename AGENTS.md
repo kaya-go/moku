@@ -41,7 +41,6 @@ moku/
 │   ├── 02_Build_Dataset_v2.ipynb # Dataset v2: corrected real + synthetic
 │   ├── 03_Annotate.ipynb      # Corner annotation workflow
 │   ├── 04_Synthetic_Preview.ipynb # Synthetic data preview
-│   ├── 10_Train_Model.ipynb   # Model fine-tuning with HF Trainer
 │   ├── 20_Analyze_Runs.ipynb  # W&B run analysis (loss/mAP curves, ranking)
 │   ├── 21_Evaluate.ipynb      # Model evaluation v1 (deprecated)
 │   ├── 22_Evaluate_v2.ipynb   # Model evaluation v2 (mAP, center-distance)
@@ -49,14 +48,15 @@ moku/
 │   └── 40_Export_ONNX.ipynb   # ONNX export for browser inference
 ├── scripts/
 │   ├── train.py               # Training script for HF Jobs (two-stage, W&B)
-│   └── launch_grid_r4.sh      # HP grid search launcher (round 4)
+│   ├── launch_grid_r4.sh      # HP grid search launcher (round 4)
+│   └── launch_grid_r5.sh      # HP grid search launcher (round 5)
 ├── src/moku/
 │   ├── __init__.py
 │   ├── cli.py                 # CLI entry point
 │   ├── dataset.py             # Dataset loading and harmonization utilities
 │   ├── evaluation.py          # Evaluation utilities (mAP, center-distance, sweep)
 │   ├── runs.py                # W&B run fetching, artifact management
-│   ├── training.py            # Training utilities (transforms, augmentation, collate)
+│   ├── model.py               # Model loading, eval transforms, collation utilities
 │   └── viz/                   # Visualization utilities
 ├── pixi.toml
 └── pyproject.toml
@@ -65,7 +65,7 @@ moku/
 ## Pipeline Overview
 
 1. **Dataset** (`01_Build_Dataset.ipynb`, `02_Build_Dataset_v2.ipynb`): Harmonize raw COCO datasets into HF datasets (`kaya-go/moku-v1`, `kaya-go/moku-v2`).
-2. **Train** (`10_Train_Model.ipynb` + `scripts/train.py`): Fine-tune RT-DETR r18vd via HF Jobs. Two-stage: synthetic pre-train → real fine-tune. Best weights saved as W&B artifacts.
+2. **Train** (`scripts/train.py`): Fine-tune RT-DETR r18vd via HF Jobs. Two-stage: synthetic pre-train → real fine-tune. Best weights saved as W&B artifacts.
 3. **Analyze** (`20_Analyze_Runs.ipynb`): Fetch W&B run metrics, plot loss/mAP curves, rank runs.
 4. **Evaluate** (`22_Evaluate_v2.ipynb`): Validate model with mAP and center-distance metrics on test set. Supports loading from HF Hub branches or W&B artifacts.
 5. **Publish** (`30_Publish_Model.ipynb`): Select best W&B artifact and push to HF Hub as official model.
@@ -75,11 +75,11 @@ moku/
 
 The harmonized dataset uses 3 categories:
 
-| ID | Name           | Description                                        |
-|----|----------------|----------------------------------------------------|
-| 0  | `black_stone`  | Individual black stone                              |
-| 1  | `white_stone`  | Individual white stone                              |
-| 2  | `board_corner` | Board corner point (small bbox at each corner)      |
+| ID  | Name           | Description                                    |
+| --- | -------------- | ---------------------------------------------- |
+| 0   | `black_stone`  | Individual black stone                         |
+| 1   | `white_stone`  | Individual white stone                         |
+| 2   | `board_corner` | Board corner point (small bbox at each corner) |
 
 Board corners enable perspective-corrected grid inference via homography.
 For go_game_v10, real `board_corner` annotations are used directly.
@@ -93,11 +93,11 @@ Categories like `empty`, `empty_edge`, `empty_corner`, `board` (full bbox) from 
 
 Raw datasets are stored at `/Users/hadim/Data/moku/raw/` (not committed to repo):
 
-| Dataset | Dir Name | Images | Kept Categories | Notes |
-|---------|----------|--------|-----------------|-------|
-| Go Game detection v10 | `Go Game detection.v10i.coco` | 256 | board, black_stone, white_stone | Primary dataset. Superset of v1. |
-| Go game detection v1 | `Go game detection.v1i.coco` | 243 | — | **Skipped**: fully contained in v10. |
-| go-chess 2 v3 | `go-chess 2.v3-go-chess.v1.coco` | 236 | goboard→board, black_stone, white_stone | Different source images. |
+| Dataset               | Dir Name                         | Images | Kept Categories                         | Notes                                |
+| --------------------- | -------------------------------- | ------ | --------------------------------------- | ------------------------------------ |
+| Go Game detection v10 | `Go Game detection.v10i.coco`    | 256    | board, black_stone, white_stone         | Primary dataset. Superset of v1.     |
+| Go game detection v1  | `Go game detection.v1i.coco`     | 243    | —                                       | **Skipped**: fully contained in v10. |
+| go-chess 2 v3         | `go-chess 2.v3-go-chess.v1.coco` | 236    | goboard→board, black_stone, white_stone | Different source images.             |
 
 ## Model Choice: RT-DETR r18vd
 
