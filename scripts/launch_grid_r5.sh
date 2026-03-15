@@ -49,7 +49,7 @@ launch() {
 		--stage 2 \
 		--round "$ROUND" \
 		--run-name "$run_name" \
-		--batch-size 16 \
+		--batch-size 32 \
 		"$@"
 	sleep "$SLEEP"
 }
