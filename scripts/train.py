@@ -265,7 +265,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--warmup-ratio", type=float, default=0.1)
-    p.add_argument("--lr-scheduler", default="cosine", choices=["cosine", "linear", "constant"])
+    p.add_argument(
+        "--lr-scheduler",
+        default="cosine",
+        choices=[
+            "cosine",
+            "linear",
+            "constant",
+            "constant_with_warmup",
+            "cosine_with_restarts",
+            "cosine_with_min_lr",
+        ],
+    )
+    p.add_argument(
+        "--lr-scheduler-kwargs",
+        type=str,
+        default=None,
+        help="JSON string of extra scheduler kwargs, e.g. '{\"num_cycles\": 4}'",
+    )
+    p.add_argument("--max-grad-norm", type=float, default=0.1, help="Max gradient norm for clipping")
     p.add_argument("--use-cpu", action="store_true", help="Force CPU (for local testing)")
     p.add_argument("--push-to-hub", action="store_true", help="Push model to HF Hub after training")
     p.add_argument(
@@ -353,6 +371,13 @@ def main():
     # --- Training arguments ---
     report_to = "none" if args.no_trackio else "trackio"
 
+    # Parse lr_scheduler_kwargs if provided
+    lr_scheduler_kwargs = None
+    if args.lr_scheduler_kwargs:
+        import json
+
+        lr_scheduler_kwargs = json.loads(args.lr_scheduler_kwargs)
+
     training_args = TrainingArguments(
         project="moku",
         output_dir=f"runs/{args.run_name}",
@@ -362,6 +387,7 @@ def main():
         learning_rate=lr,
         weight_decay=args.weight_decay,
         lr_scheduler_type=args.lr_scheduler,
+        lr_scheduler_kwargs=lr_scheduler_kwargs,
         warmup_ratio=args.warmup_ratio,
         eval_strategy="epoch",
         save_strategy="epoch",
@@ -374,7 +400,7 @@ def main():
         dataloader_num_workers=0,
         fp16=False,
         bf16=torch.cuda.is_available() and not args.use_cpu,
-        max_grad_norm=0.1,
+        max_grad_norm=args.max_grad_norm,
         use_cpu=args.use_cpu,
         push_to_hub=False,
         report_to=report_to,
