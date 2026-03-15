@@ -38,7 +38,8 @@ launch() {
 		--detach \
 		--flavor "$FLAVOR" \
 		--timeout "3h" \
-		--secrets HF_TOKEN WANDB_API_KEY \
+		--secrets HF_TOKEN \
+		--secrets WANDB_API_KEY \
 		scripts/train.py \
 		--stage 2 \
 		--round "$ROUND" \

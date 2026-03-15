@@ -24,11 +24,13 @@ Usage (local CPU test, stage 1):
     uv run scripts/train.py --stage 1 --num-epochs 2 --use-cpu
 
 Usage (HF Jobs, stage 1):
-    hf jobs uv run --detach --flavor a10g-small --timeout 3h --secrets HF_TOKEN WANDB_API_KEY \\
+    hf jobs uv run --detach --flavor a10g-small --timeout 3h \\
+        --secrets HF_TOKEN --secrets WANDB_API_KEY \\
         scripts/train.py --stage 1 --run-name v2_stage1 --num-epochs 30 --push-to-hub
 
 Usage (HF Jobs, stage 2 from stage 1 branch):
-    hf jobs uv run --detach --flavor a10g-small --timeout 3h --secrets HF_TOKEN WANDB_API_KEY \\
+    hf jobs uv run --detach --flavor a10g-small --timeout 3h \\
+        --secrets HF_TOKEN --secrets WANDB_API_KEY \\
         scripts/train.py --stage 2 --run-name v2_stage2_lr2e-5 --lr 2e-5 --num-epochs 50
 
 Resume interrupted training:
