@@ -27,7 +27,7 @@ export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
 
 FLAVOR="a10g-large"
 GROUP="${1:-all}"
-RUN_ID="run_4"
+ROUND="r4"
 SLEEP=10
 
 launch() {
@@ -38,9 +38,10 @@ launch() {
 		--detach \
 		--flavor "$FLAVOR" \
 		--timeout "3h" \
-		--secrets HF_TOKEN \
+		--secrets HF_TOKEN WANDB_API_KEY \
 		scripts/train.py \
 		--stage 2 \
+		--round "$ROUND" \
 		--run-name "$run_name" \
 		--batch-size 16 \
 		"$@"
@@ -166,5 +167,5 @@ all)
 esac
 
 echo ""
-echo "Monitor at: https://huggingface.co/spaces/kaya-go/moku-experiments"
+echo "Monitor at: https://wandb.ai/hadim/moku/overview"
 echo "List jobs: hf jobs ps"

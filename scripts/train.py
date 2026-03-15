@@ -24,11 +24,11 @@ Usage (local CPU test, stage 1):
     uv run scripts/train.py --stage 1 --num-epochs 2 --use-cpu
 
 Usage (HF Jobs, stage 1):
-    hf jobs uv run --detach --flavor a10g-small --timeout 3h --secrets HF_TOKEN \\
+    hf jobs uv run --detach --flavor a10g-small --timeout 3h --secrets HF_TOKEN WANDB_API_KEY \\
         scripts/train.py --stage 1 --run-name v2_stage1 --num-epochs 30 --push-to-hub
 
 Usage (HF Jobs, stage 2 from stage 1 branch):
-    hf jobs uv run --detach --flavor a10g-small --timeout 3h --secrets HF_TOKEN \\
+    hf jobs uv run --detach --flavor a10g-small --timeout 3h --secrets HF_TOKEN WANDB_API_KEY \\
         scripts/train.py --stage 2 --run-name v2_stage2_lr2e-5 --lr 2e-5 --num-epochs 50
 
 Resume interrupted training:
@@ -38,7 +38,9 @@ Resume interrupted training:
 from __future__ import annotations
 
 import argparse
+import os
 import random
+import sys
 
 import torch
 from datasets import load_dataset
@@ -135,10 +137,10 @@ class MAPEvalCallback(TrainerCallback):
 
         # Log mAP metrics so they appear in W&B
         map_metrics = {
-            "eval_map": float(result.get("map", 0)),
-            "eval_map_50": float(result.get("map_50", 0)),
-            "eval_map_75": float(result.get("map_75", 0)),
-            "eval_mar_400": float(result.get("mar_400", 0)),
+            "eval/map": float(result.get("map", 0)),
+            "eval/map_50": float(result.get("map_50", 0)),
+            "eval/map_75": float(result.get("map_75", 0)),
+            "eval/mar_400": float(result.get("mar_400", 0)),
         }
         if state.log_history:
             state.log_history[-1].update(map_metrics)
@@ -146,7 +148,7 @@ class MAPEvalCallback(TrainerCallback):
             self.trainer.log(map_metrics)
 
         print(
-            f"  mAP@50:95={map_metrics['eval_map']:.4f}  mAP@50={map_metrics['eval_map_50']:.4f}  mAP@75={map_metrics['eval_map_75']:.4f}  mAR@400={map_metrics['eval_mar_400']:.4f}"
+            f"  mAP@50:95={map_metrics['eval/map']:.4f}  mAP@50={map_metrics['eval/map_50']:.4f}  mAP@75={map_metrics['eval/map_75']:.4f}  mAR@400={map_metrics['eval/mar_400']:.4f}"
         )
 
 
@@ -293,11 +295,21 @@ def parse_args() -> argparse.Namespace:
         help="HF Hub branch to push to (default: stage1 for stage 1, main for stage 2)",
     )
     p.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
+    p.add_argument("--round", type=str, default=None, help="Round label for W&B grouping (e.g. r4)")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
+
+    # --- W&B setup ---
+    if not args.no_wandb:
+        if not os.environ.get("WANDB_API_KEY"):
+            print("ERROR: WANDB_API_KEY environment variable is not set.")
+            print("Set it via .env file locally or as an HF secret for HF Jobs.")
+            sys.exit(1)
+        os.environ.setdefault("WANDB_ENTITY", "hadim")
+        os.environ.setdefault("WANDB_PROJECT", "moku")
 
     # --- Determine dataset config and model source ---
     if args.stage == 1:
@@ -379,7 +391,6 @@ def main():
         lr_scheduler_kwargs = json.loads(args.lr_scheduler_kwargs)
 
     training_args = TrainingArguments(
-        project="moku",
         output_dir=f"runs/{args.run_name}",
         num_train_epochs=num_epochs,
         per_device_train_batch_size=args.batch_size,
@@ -406,6 +417,37 @@ def main():
         report_to=report_to,
         run_name=args.run_name,
     )
+
+    # --- W&B metadata (group + tags) ---
+    if report_to == "wandb":
+        import wandb
+
+        tags = [f"stage{args.stage}"]
+        if args.round:
+            tags.append(args.round)
+        wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "moku"),
+            entity=os.environ.get("WANDB_ENTITY", "hadim"),
+            name=args.run_name,
+            group=args.round,
+            tags=tags,
+            config={
+                "stage": args.stage,
+                "round": args.round,
+                "learning_rate": lr,
+                "lr_scheduler": args.lr_scheduler,
+                "lr_scheduler_kwargs": lr_scheduler_kwargs,
+                "num_epochs": num_epochs,
+                "batch_size": args.batch_size,
+                "weight_decay": args.weight_decay,
+                "warmup_ratio": args.warmup_ratio,
+                "max_grad_norm": args.max_grad_norm,
+                "model_source": model_source,
+                "dataset_config": config_name,
+                "hub_revision": hub_revision,
+            },
+            resume="allow",
+        )
 
     map_callback = MAPEvalCallback(dataset["validation"], image_processor)
     callbacks = [map_callback]
