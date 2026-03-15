@@ -85,22 +85,19 @@ def list_wandb_model_artifacts(
 
     api = wandb.Api()
     rows: list[dict] = []
-    try:
-        for collection in api.artifact_type("model", f"{entity}/{project}").collections():
-            for artifact in collection.versions():
-                row = {
-                    "name": artifact.name,
-                    "version": artifact.version,
-                    "aliases": artifact.aliases,
-                    "created_at": artifact.created_at,
-                    "size_mb": round(artifact.size / 1e6, 1) if artifact.size else None,
-                }
-                row.update(artifact.metadata or {})
-                if artifact.logged_by():
-                    row["run"] = artifact.logged_by().name
-                rows.append(row)
-    except Exception:
-        pass
+    for collection in api.artifact_type("model", f"{entity}/{project}").collections():
+        for artifact in collection.artifacts():
+            row = {
+                "name": artifact.name,
+                "version": artifact.version,
+                "aliases": artifact.aliases,
+                "created_at": artifact.created_at,
+                "size_mb": round(artifact.size / 1e6, 1) if artifact.size else None,
+            }
+            row.update(artifact.metadata or {})
+            if artifact.logged_by():
+                row["run"] = artifact.logged_by().name
+            rows.append(row)
 
     return pd.DataFrame(rows)
 

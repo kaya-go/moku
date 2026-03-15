@@ -176,7 +176,11 @@ class MAPEvalCallback(TrainerCallback):
             self._save_artifact(model, epoch, map_metrics)
 
     def _save_artifact(self, model, epoch: int, map_metrics: dict) -> None:
-        """Save model + image processor as a W&B artifact."""
+        """Save model + image processor as a W&B artifact.
+
+        Only keeps the latest version — previous versions are deleted to
+        avoid quota bloat.
+        """
         import tempfile
 
         import wandb
@@ -184,12 +188,26 @@ class MAPEvalCallback(TrainerCallback):
         if wandb.run is None:
             return
 
+        artifact_name = f"model-{wandb.run.name}"
+
+        # Delete previous versions before logging a new one
+        api = wandb.Api()
+        try:
+            collection = api.artifact(
+                f"{wandb.run.entity}/{wandb.run.project}/{artifact_name}:latest",
+            )
+            for v in collection.collection.artifacts():
+                if v.state == "COMMITTED":
+                    v.delete(delete_aliases=True)
+        except wandb.errors.CommError:
+            pass  # No previous versions exist yet
+
         with tempfile.TemporaryDirectory() as tmpdir:
             model.save_pretrained(tmpdir)
             self.image_processor.save_pretrained(tmpdir)
 
             artifact = wandb.Artifact(
-                name=f"model-{wandb.run.name}",
+                name=artifact_name,
                 type="model",
                 metadata={
                     "epoch": epoch,

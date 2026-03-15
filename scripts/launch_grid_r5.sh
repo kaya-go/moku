@@ -42,7 +42,7 @@ launch() {
 	hf jobs uv run \
 		--detach \
 		--flavor "$FLAVOR" \
-		--timeout "8h" \
+		--timeout "3h" \
 		--secrets HF_TOKEN \
 		--secrets-file "$SCRIPT_DIR/../.env" \
 		scripts/train.py \
