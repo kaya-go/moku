@@ -301,8 +301,23 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _load_dotenv():
+    """Load .env file if present (for local dev). No-op on HF Jobs."""
+    env_path = os.path.join(os.path.dirname(__file__), os.pardir, ".env")
+    if not os.path.isfile(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
+
+
 def main():
     args = parse_args()
+    _load_dotenv()
 
     # --- W&B setup ---
     if not args.no_wandb:
