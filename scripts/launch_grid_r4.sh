@@ -25,10 +25,6 @@ set -euo pipefail
 
 export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
 
-# Load .env if present (local dev)
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-[[ -f "$SCRIPT_DIR/../.env" ]] && set -a && source "$SCRIPT_DIR/../.env" && set +a
-
 FLAVOR="a10g-large"
 GROUP="${1:-all}"
 ROUND="r4"
@@ -43,7 +39,7 @@ launch() {
 		--flavor "$FLAVOR" \
 		--timeout "3h" \
 		--secrets HF_TOKEN \
-		--secrets WANDB_API_KEY \
+		--secrets-file "$SCRIPT_DIR/../.env" \
 		scripts/train.py \
 		--stage 2 \
 		--round "$ROUND" \
