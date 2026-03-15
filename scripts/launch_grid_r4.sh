@@ -25,6 +25,10 @@ set -euo pipefail
 
 export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
 
+# Load .env if present (local dev)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+[[ -f "$SCRIPT_DIR/../.env" ]] && set -a && source "$SCRIPT_DIR/../.env" && set +a
+
 FLAVOR="a10g-large"
 GROUP="${1:-all}"
 ROUND="r4"
