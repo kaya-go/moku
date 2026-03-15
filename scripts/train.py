@@ -8,6 +8,8 @@
 #     "accelerate>=1.12.0",
 #     "trackio>=0.15.0",
 #     "pycocotools>=2.0.11",
+#     "torchmetrics>=1.7.0",
+#     "faster-coco-eval>=1.7.0",
 #     "scipy",
 #     "huggingface_hub>=1.5.0",
 # ]
@@ -60,6 +62,89 @@ STAGE1_REVISION = "stage1"
 CATEGORIES = {"black_stone": 0, "white_stone": 1, "board_corner": 2}
 ID_TO_CATEGORY = {v: k for k, v in CATEGORIES.items()}
 NUM_LABELS = len(CATEGORIES)
+
+
+class MAPEvalCallback(TrainerCallback):
+    """Compute COCO mAP on eval set after each evaluation and log to Trackio."""
+
+    def __init__(self, eval_dataset, image_processor: RTDetrImageProcessor, threshold: float = 0.3):
+        self.eval_dataset = eval_dataset
+        self.image_processor = image_processor
+        self.threshold = threshold
+
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        epoch = int(state.epoch) + 1 if state.epoch is not None else 1
+        total = int(args.num_train_epochs)
+        print(f"\n{'=' * 60}")
+        print(f"  Epoch {epoch}/{total} — Training")
+        print(f"{'=' * 60}")
+
+    def on_evaluate(self, args, state, control, model=None, **kwargs):
+        epoch = int(state.epoch) if state.epoch else 0
+        print(f"\n{'-' * 60}")
+        print(f"  Epoch {epoch} — Evaluation")
+        print(f"{'-' * 60}")
+
+        if model is None:
+            return
+        from torchmetrics.detection import MeanAveragePrecision
+
+        device = next(model.parameters()).device
+        model.eval()
+
+        metric = MeanAveragePrecision(
+            box_format="xyxy",
+            iou_type="bbox",
+            max_detection_thresholds=[1, 10, 400],
+            backend="faster_coco_eval",
+        )
+
+        dataloader = torch.utils.data.DataLoader(self.eval_dataset, batch_size=8, collate_fn=collate_fn, shuffle=False)
+
+        for batch in dataloader:
+            pixel_values = batch["pixel_values"].to(device)
+            labels = batch["labels"]
+
+            with torch.no_grad():
+                outputs = model(pixel_values=pixel_values)
+
+            orig_sizes = torch.stack([lab["orig_size"] for lab in labels]).to(device)
+            results = self.image_processor.post_process_object_detection(
+                outputs, target_sizes=orig_sizes, threshold=self.threshold
+            )
+
+            preds = [
+                {"boxes": r["boxes"].cpu(), "scores": r["scores"].cpu(), "labels": r["labels"].cpu()} for r in results
+            ]
+
+            targets = []
+            for lab in labels:
+                boxes_cxcywh = lab["boxes"]
+                orig_h, orig_w = lab["orig_size"]
+                cx, cy, w, h = boxes_cxcywh.unbind(-1)
+                abs_boxes = torch.stack(
+                    [(cx - w / 2) * orig_w, (cy - h / 2) * orig_h, (cx + w / 2) * orig_w, (cy + h / 2) * orig_h],
+                    dim=-1,
+                )
+                targets.append({"boxes": abs_boxes.cpu(), "labels": lab["class_labels"].cpu()})
+
+            metric.update(preds, targets)
+
+        result = metric.compute()
+
+        # Log mAP metrics so they appear in Trackio
+        map_metrics = {
+            "eval_map": float(result.get("map", 0)),
+            "eval_map_50": float(result.get("map_50", 0)),
+            "eval_map_75": float(result.get("map_75", 0)),
+            "eval_mar_400": float(result.get("mar_400", 0)),
+        }
+        if state.log_history:
+            state.log_history[-1].update(map_metrics)
+
+        print(
+            f"  mAP@50:95={map_metrics['eval_map']:.4f}  mAP@50={map_metrics['eval_map_50']:.4f}  mAP@75={map_metrics['eval_map_75']:.4f}  mAR@400={map_metrics['eval_mar_400']:.4f}"
+        )
 
 
 class HubPushCallback(TrainerCallback):
@@ -288,11 +373,11 @@ def main():
         use_cpu=args.use_cpu,
         push_to_hub=False,
         report_to=report_to,
-        trackio_space_id="kaya-go/moku-training" if report_to == "trackio" else None,
+        trackio_space_id="kaya-go/moku-experiments" if report_to == "trackio" else None,
         run_name=args.run_name,
     )
 
-    callbacks = []
+    callbacks = [MAPEvalCallback(dataset["validation"], image_processor)]
     if args.push_to_hub:
         callbacks.append(HubPushCallback(HF_MODEL, hub_revision, image_processor))
 

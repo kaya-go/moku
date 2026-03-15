@@ -7,7 +7,7 @@
 #   bash scripts/launch_grid.sh stage2    # Stage 2 only (real fine-tune LR sweep)
 #
 # Logs to the same Trackio Space for comparison.
-# Compare results at: https://huggingface.co/spaces/kaya-go/moku-training
+# Compare results at: https://huggingface.co/spaces/kaya-go/moku-experiments
 set -euo pipefail
 
 export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
@@ -38,8 +38,9 @@ launch_stage2() {
 	echo "=== Stage 2: Real fine-tuning LR sweep ==="
 	LRS=(2e-4 5e-4 1e-3)
 	for lr in "${LRS[@]}"; do
-		run_name="stage2_lr${lr}_run_3"
-		hub_rev="stage2-lr${lr}_run_3"
+		run_id="run_3"
+		run_name="stage2_lr${lr}_${run_id}"
+		hub_rev="stage2-lr${lr}_${run_id}"
 		echo "  Launching: ${run_name} → branch ${hub_rev}"
 		hf jobs uv run \
 			--detach \
@@ -77,5 +78,5 @@ both)
 esac
 
 echo ""
-echo "Monitor at: https://huggingface.co/spaces/kaya-go/moku-training"
+echo "Monitor at: https://huggingface.co/spaces/kaya-go/moku-experiments"
 echo "List jobs: hf jobs ps"

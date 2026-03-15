@@ -11,6 +11,21 @@
 - **Test mAP@50:95**: **0.39** — moderate; data quality/quantity is the main bottleneck
 - **Main weakness**: `board_corner` detections — partially due to synthetic 20×20 bboxes in go-chess source, minimal augmentation, and small dataset size
 
+### v1 Metrics (baseline)
+
+| Metric | Value |
+|--------|-------|
+| mAP@50:95 | 0.3995 |
+| mAP@50 | 0.7207 |
+| mAP@75 | 0.3725 |
+| mAR@400 | 0.5072 |
+
+| Category | AP@50:95 |
+|----------|----------|
+| black_stone | 0.5135 |
+| white_stone | 0.4706 |
+| board_corner | 0.2142 |
+
 ## v1 Completed
 
 - [x] Collected 3 raw COCO datasets from Roboflow
@@ -99,6 +114,23 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 - Run 1: LR sweep 1e-5, 2e-5, 5e-5 (50 epochs) — under-fit, mAP well below v1
 - Run 2: LR sweep 5e-5, 8e-5, 1e-4, 2e-4 (50 epochs) — still below v1 mAP
 - Run 3 (current): LR sweep 2e-4, 5e-4, 1e-3 (500 epochs) — trying higher LRs and longer training
+
+### v2 Run 2 Metrics — Stage 2 lr=2e-4, 50 epochs (real test)
+
+| Metric | Value |
+|--------|-------|
+| mAP@50:95 | 0.3380 |
+| mAP@50 | 0.5994 |
+| mAP@75 | 0.3569 |
+| mAR@400 | 0.4232 |
+
+| Category | AP@50:95 |
+|----------|----------|
+| black_stone | 0.2745 |
+| white_stone | 0.4211 |
+| board_corner | 0.3183 |
+
+**Observations**: v2 lr=2e-4 (50 epochs) trails v1 overall (0.338 vs 0.400 mAP), but board_corner AP improved significantly (0.318 vs 0.214) thanks to corrected corner annotations and synthetic pre-training. Stone detection dropped — likely due to too-short fine-tuning (50 epochs). Run 3 with 500 epochs should recover stone performance.
 
 - [x] Update `notebooks/02_Train_Model.ipynb` with two-stage training sections
 - [x] Stage 1: pre-train on synthetic dataset
