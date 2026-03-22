@@ -223,8 +223,8 @@
     /* ── Magnifier (follows mouse) ── */
     #mag-wrap {
       position: fixed;
-      width: 200px;
-      height: 200px;
+      width: 300px;
+      height: 300px;
       border-radius: 50%;
       border: 2px solid rgba(108,99,255,0.6);
       overflow: hidden;
@@ -390,6 +390,7 @@
       <button class="tool-btn" id="tool-black" onclick="setTool('black')" title="Place black stones (2)">⚫ Black</button>
       <button class="tool-btn" id="tool-white" onclick="setTool('white')" title="Place white stones (3)">⚪ White</button>
       <button class="tool-btn" id="tool-move" onclick="setTool('move')" title="Move / select (V)">✋ Move</button>
+      <button class="tool-btn" id="tool-eraser" onclick="setTool('eraser')" title="Click to erase (4/E)">✂ Erase</button>
     </div>
     <div class="tb-sep"></div>
     <button class="btn-delete" onclick="deleteSelected()" title="Delete selected (Del)"><span class="btn-icon">🗑</span></button>
@@ -417,15 +418,20 @@
     <div id="canvas-wrap">
       <canvas id="main-canvas"></canvas>
       <div id="mag-wrap">
-        <canvas id="mag-canvas" width="200" height="200"></canvas>
+        <canvas id="mag-canvas" width="300" height="300"></canvas>
       </div>
     </div>
 
     <div id="ann-panel">
       <h3>Annotations</h3>
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 2px;">
+        <label style="font-size:12px;color:var(--text-dim);white-space:nowrap;">Score ≥</label>
+        <input type="range" id="threshold-slider" min="0" max="1" step="0.05" value="0" oninput="onScoreThresholdChange(this.value)" style="flex:1;accent-color:var(--accent);">
+        <span id="threshold-value" style="font-size:12px;color:var(--accent-light);min-width:32px;text-align:right;">0.00</span>
+      </div>
       <div id="ann-list"></div>
       <div class="shortcuts-panel">
-        <kbd>1</kbd> Corner &nbsp; <kbd>2</kbd> Black &nbsp; <kbd>3</kbd> White &nbsp; <kbd>V</kbd> Move<br>
+        <kbd>1</kbd> Corner &nbsp; <kbd>2</kbd> Black &nbsp; <kbd>3</kbd> White &nbsp; <kbd>V</kbd> Move &nbsp; <kbd>4</kbd> Erase<br>
         <kbd>Click</kbd> Add/Select &nbsp; <kbd>Drag</kbd> Move<br>
         <kbd>Right-click</kbd> Delete &nbsp; <kbd>Del</kbd> Delete selected<br>
         <kbd>←</kbd><kbd>→</kbd> Prev/Next &nbsp; <kbd>Shift+←</kbd><kbd>→</kbd> Flagged<br>

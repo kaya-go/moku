@@ -25,7 +25,7 @@ var CAT_CORNER   = 2;
 var MAX_CORNERS  = 4;
 var CORNER_SIZE  = 20;
 var STONE_SIZE   = 20;
-var MAG_SIZE     = 200;
+var MAG_SIZE     = 300;
 var MAG_ZOOM     = 5;
 var DRAG_THRESH  = 3;
 var HIT_PADDING  = 6;
@@ -64,6 +64,7 @@ var lockedId     = null;  // corner locked to mouse cursor
 
 var mouseScreenX = 0, mouseScreenY = 0;
 var magEnabled   = true;
+var scoreThreshold = 0.0;
 
 var canvas, ctx, magCanvas, magCtx, currentImg;
 var canvasWrap;
@@ -213,7 +214,7 @@ function render() {
   ctx.clearRect(0, 0, w, h);
   ctx.drawImage(currentImg, 0, 0);
 
-  currentAnns.forEach(function(box) {
+  visibleAnns().forEach(function(box) {
     var sel   = box.id === selectedId;
     var color = CAT_COLORS[box.category] || '#ffffff';
     var cx = box.x + box.w / 2;
@@ -302,7 +303,7 @@ function renderMagnifier() {
   magCtx.moveTo(0, MAG_SIZE / 2); magCtx.lineTo(MAG_SIZE, MAG_SIZE / 2);
   magCtx.stroke();
 
-  currentAnns.forEach(function(box) {
+  visibleAnns().forEach(function(box) {
     var color = CAT_COLORS[box.category] || '#ffffff';
     var bx = (box.x - srcX) * MAG_ZOOM;
     var by = (box.y - srcY) * MAG_ZOOM;
@@ -327,7 +328,7 @@ function renderMagnifier() {
 function boxLabel(box) {
   if (box.category === CAT_BLACK) return 'B';
   if (box.category === CAT_WHITE) return 'W';
-  var corners = currentAnns.filter(function(b) { return b.category === CAT_CORNER; });
+  var corners = visibleAnns().filter(function(b) { return b.category === CAT_CORNER; });
   if (corners.length < 2) return 'C';
   var cx2 = corners.reduce(function(s, b) { return s + b.x + b.w / 2; }, 0) / corners.length;
   var cy2 = corners.reduce(function(s, b) { return s + b.y + b.h / 2; }, 0) / corners.length;
@@ -343,8 +344,9 @@ function getCanvasCoords(e) {
 function boxAtImage(imgX, imgY) {
   var s = baseScale * zoom;
   var padImg = HIT_PADDING / s;
-  for (var i = currentAnns.length - 1; i >= 0; i--) {
-    var b = currentAnns[i];
+  var vis = visibleAnns();
+  for (var i = vis.length - 1; i >= 0; i--) {
+    var b = vis[i];
     var cx = b.x + b.w / 2;
     var cy = b.y + b.h / 2;
     if (b.category !== CAT_CORNER) {
@@ -361,6 +363,13 @@ function boxAtImage(imgX, imgY) {
 function getCurrentImage() {
   if (currentFilteredPos < 0 || currentFilteredPos >= filteredIdx.length) return null;
   return allImages[filteredIdx[currentFilteredPos]];
+}
+
+function visibleAnns() {
+  if (scoreThreshold <= 0) return currentAnns;
+  return currentAnns.filter(function(b) {
+    return b.score === undefined || b.score >= scoreThreshold;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +411,11 @@ function onMouseDown(e) {
 
   var hit = boxAtImage(im.x, im.y);
   if (hit) {
+    // Eraser: instant delete on click
+    if (activeTool === 'eraser') {
+      removeBox(hit.id);
+      return;
+    }
     // Click on a corner -> lock it to the mouse
     if (hit.category === CAT_CORNER) {
       selectedId = hit.id;
@@ -499,7 +513,7 @@ function onMouseUp(e) {
   if (e.button !== 0) return;
   var coords = getCanvasCoords(e);
 
-  if (!isDragging && !hasDragged && activeTool !== 'move') {
+  if (!isDragging && !hasDragged && activeTool !== 'move' && activeTool !== 'eraser') {
     var im = screenToImage(coords.x, coords.y);
     var hit = boxAtImage(im.x, im.y);
     if (hit) {
@@ -573,6 +587,7 @@ function onKeyDown(e) {
     case '1': setTool('corner'); break;
     case '2': setTool('black'); break;
     case '3': setTool('white'); break;
+    case '4': case 'e': case 'E': setTool('eraser'); break;
     case 'v': case 'V': setTool('move'); break;
     case '0': resetZoom(); render(); break;
     case 'm': case 'M':
@@ -611,7 +626,7 @@ function setTool(tool) {
 function addAnnotation(imgX, imgY) {
   var cat, size;
   if (activeTool === 'corner') {
-    if (currentAnns.filter(function(b) { return b.category === CAT_CORNER; }).length >= MAX_CORNERS) {
+    if (visibleAnns().filter(function(b) { return b.category === CAT_CORNER; }).length >= MAX_CORNERS) {
       showToast('Max 4 corners - delete one first', 'error');
       return;
     }
@@ -625,6 +640,15 @@ function addAnnotation(imgX, imgY) {
     size = STONE_SIZE;
   } else {
     return;
+  }
+
+  // For stones, use average size of existing same-category annotations
+  if (cat !== CAT_CORNER) {
+    var sameCategory = visibleAnns().filter(function(b) { return b.category === cat; });
+    if (sameCategory.length > 0) {
+      var avgSize = sameCategory.reduce(function(s, b) { return s + Math.max(b.w, b.h); }, 0) / sameCategory.length;
+      size = Math.round(avgSize);
+    }
   }
 
   var newId = Date.now() + Math.floor(Math.random() * 1000);
@@ -653,6 +677,39 @@ function removeBox(id) {
   currentAnns = currentAnns.filter(function(b) { return b.id !== id; });
   if (selectedId === id) selectedId = null;
   markDirty();
+  render();
+  renderMagnifier();
+  renderAnnPanel();
+  setStatus();
+}
+
+function trimCorners() {
+  var vis = visibleAnns();
+  var corners = vis.filter(function(b) { return b.category === CAT_CORNER; });
+  if (corners.length <= MAX_CORNERS) {
+    showToast('Already \u2264 ' + MAX_CORNERS + ' corners');
+    return;
+  }
+  corners.sort(function(a, b) { return (b.score || 0) - (a.score || 0); });
+  var keepIds = {};
+  corners.slice(0, MAX_CORNERS).forEach(function(b) { keepIds[b.id] = true; });
+  currentAnns = currentAnns.filter(function(b) {
+    return b.category !== CAT_CORNER || keepIds[b.id];
+  });
+  markDirty();
+  render();
+  renderMagnifier();
+  renderAnnPanel();
+  setStatus();
+  showToast('Trimmed to top ' + MAX_CORNERS + ' corners');
+}
+
+function onScoreThresholdChange(val) {
+  var oldThreshold = scoreThreshold;
+  scoreThreshold = parseFloat(val) || 0;
+  document.getElementById('threshold-value').textContent = scoreThreshold.toFixed(2);
+  var nHidden = currentAnns.length - visibleAnns().length;
+  if (nHidden > 0 && scoreThreshold !== oldThreshold) markDirty();
   render();
   renderMagnifier();
   renderAnnPanel();
@@ -708,15 +765,17 @@ async function nextFiltered() {
 async function saveAnnotations() {
   var img = getCurrentImage();
   if (!img) return;
+  var toSave = visibleAnns();
+  currentAnns = toSave;  // permanently remove hidden annotations
   await fetch('/api/annotations/' + encodeURIComponent(img.filename), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ boxes: currentAnns, filename: img.filename }),
+    body: JSON.stringify({ boxes: toSave, filename: img.filename }),
   });
   _dirty = false;
   var gIdx = filteredIdx[currentFilteredPos];
   allImages[gIdx].annotated = true;
-  allImages[gIdx].corner_count = currentAnns.filter(function(b) { return b.category === CAT_CORNER; }).length;
+  allImages[gIdx].corner_count = toSave.filter(function(b) { return b.category === CAT_CORNER; }).length;
   renderSidebar();
   showToast('Saved!');
 }
@@ -766,13 +825,19 @@ function renderSidebar() {
 // ---------------------------------------------------------------------------
 
 function renderAnnPanel() {
-  var corners = currentAnns.filter(function(b) { return b.category === CAT_CORNER; });
-  var blacks  = currentAnns.filter(function(b) { return b.category === CAT_BLACK; });
-  var whites  = currentAnns.filter(function(b) { return b.category === CAT_WHITE; });
+  var vis = visibleAnns();
+  var corners = vis.filter(function(b) { return b.category === CAT_CORNER; });
+  var blacks  = vis.filter(function(b) { return b.category === CAT_BLACK; });
+  var whites  = vis.filter(function(b) { return b.category === CAT_WHITE; });
+  var nHidden = currentAnns.length - vis.length;
 
   var html = '';
 
-  html += '<div class="grp-title">Corners (' + corners.length + '/' + MAX_CORNERS + ')</div>';
+  html += '<div class="grp-title" style="display:flex;align-items:center;gap:4px;">Corners (' + corners.length + '/' + MAX_CORNERS + ')';
+  if (corners.length > MAX_CORNERS) {
+    html += '<button onclick="trimCorners()" style="font-size:11px;padding:1px 6px;margin-left:auto;cursor:pointer;background:var(--bg-hover);color:var(--orange);border:1px solid var(--orange);border-radius:4px;">Trim top-4</button>';
+  }
+  html += '</div>';
   if (corners.length === 0) {
     html += '<div style="color:var(--text-muted);font-size:12px;padding:2px 6px;">Select Corner tool & click</div>';
   }
@@ -826,6 +891,10 @@ function renderAnnPanel() {
     html += '</div>';
   }
 
+  if (nHidden > 0) {
+    html += '<div style="color:var(--text-muted);font-size:12px;padding:4px 6px;margin-top:6px;border-top:1px solid var(--border);">' + nHidden + ' hidden (below threshold)</div>';
+  }
+
   document.getElementById('ann-list').innerHTML = html;
 }
 
@@ -858,9 +927,10 @@ function setStatus() {
   if (!img) { bar.textContent = 'No images loaded'; return; }
 
   var im = screenToImage(mouseScreenX, mouseScreenY);
-  var nCorners = currentAnns.filter(function(b) { return b.category === CAT_CORNER; }).length;
-  var nBlack   = currentAnns.filter(function(b) { return b.category === CAT_BLACK; }).length;
-  var nWhite   = currentAnns.filter(function(b) { return b.category === CAT_WHITE; }).length;
+  var vis = visibleAnns();
+  var nCorners = vis.filter(function(b) { return b.category === CAT_CORNER; }).length;
+  var nBlack   = vis.filter(function(b) { return b.category === CAT_BLACK; }).length;
+  var nWhite   = vis.filter(function(b) { return b.category === CAT_WHITE; }).length;
   var tool     = activeTool.charAt(0).toUpperCase() + activeTool.slice(1);
 
   bar.textContent = '[' + (currentFilteredPos + 1) + '/' + filteredIdx.length + '] ' + img.filename +
