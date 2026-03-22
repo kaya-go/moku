@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Phase**: Model v2 training — Round 6 in progress
+**Phase**: v3 dataset expansion — scrape + pseudo-label + manual correction
 
 ## v1 Results
 
@@ -178,15 +178,96 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 
 ---
 
-## Future (post-v2)
+## v3 Plan — Data-Centric Expansion
 
-### Pseudo-labeling on Real Scraped Images
+**Goal**: 3–5× the real training images via scraping + pseudo-labeling + manual correction. HP tuning is saturated on 382 images — more real data is the only remaining lever.
 
-*(Deferred from v2 — pursue after v2 model is established)*
+**v2 model** (`kaya-go/moku-v2`, best R6 artifact): used for pseudo-labeling.
 
-- Scrape real goban images from Flickr (CC license) + Reddit r/baduk
-- Run v2 model for pseudo-annotations → human review/correction
-- Add to dataset for v3
+### Phase 1 — Image Scraping (`src/moku/scraper.py`, `notebooks/05_Scrape_Images.ipynb`)
+
+Collect as many real goban photos as possible from public sources:
+
+| Source | Method | License | Target |
+|--------|--------|---------|--------|
+| Flickr | API search (`go board`, `goban`, `baduk`, `weiqi`, `围棋`, `碁`) | CC-BY / CC0 | 500–1000 |
+| Reddit r/baduk | PRAW or pushshift API, image posts | Public | 200–500 |
+| Wikimedia Commons | API search | CC / public domain | 50–100 |
+| Google Images (optional) | Manual download or `icrawler` | Fair use / CC only | 100–300 |
+
+**Implementation**:
+- [ ] Create `src/moku/scraper.py`: async scraper using `httpx` for Flickr API + Reddit JSON API + Wikimedia API
+  - Flickr: search by tags, download medium/large size, save metadata (license, author, URL)
+  - Reddit: fetch r/baduk image posts (i.redd.it, imgur links)
+  - Wikimedia: search "Go (game)" category
+- [ ] Deduplicate by perceptual hash (dhash) — avoid near-duplicate images
+- [ ] Filter out non-goban images (simple heuristic: aspect ratio ~1:1, min size 400×400)
+- [ ] Save scraped images to `data/scrape/images/` with metadata JSON
+- [ ] Create `notebooks/05_Scrape_Images.ipynb`: run scraper, preview results, push to staging
+
+### Phase 2 — Pseudo-Labeling (`notebooks/06_Pseudo_Label.ipynb`)
+
+Run v2 model inference on all scraped images to generate initial annotations:
+
+- [ ] Load best v2 model from HF Hub (`kaya-go/moku-v2`)
+- [ ] Run batch inference on scraped images (confidence threshold ~0.3 to keep borderline detections for human review)
+- [ ] Convert model outputs to COCO annotation format (same as `images.json` for annotator)
+- [ ] Flag images for review:
+  - `no_board`: 0 corners detected → likely not a goban → candidate for exclusion
+  - `partial_board`: 1–3 corners → keep but flag
+  - `low_confidence`: any detection < 0.5 confidence
+  - `high_stone_count`: > 200 stones (suspicious)
+- [ ] Generate `data/scrape/images.json` in annotator format
+- [ ] Preview pseudo-labels: grid of images with predicted bboxes overlaid
+
+### Phase 3 — Manual Correction (`tools/annotator/`)
+
+Use the existing HTML annotator to review and correct pseudo-labels:
+
+- [ ] **Add exclude/skip functionality** to annotator:
+  - New button "Exclude" (or `X` shortcut) to mark an image as excluded
+  - Excluded images saved in `corrected.json` with `{"excluded": true}` flag
+  - Excluded images shown dimmed in sidebar, filterable
+  - New filter: "excluded" / "not excluded"
+- [ ] **Add confidence display**: show model confidence scores on each bbox for review guidance
+- [ ] Workflow:
+  1. Start annotator: `python tools/annotator/server.py --data-dir data/scrape`
+  2. Filter "flagged" images first (no_board, low_confidence) to quickly exclude non-goban images
+  3. Review remaining images: correct stone/corner positions, exclude bad images
+  4. Corrections saved to `data/scrape/corrected.json`
+
+### Phase 4 — Dataset v3 Build (`notebooks/07_Build_Dataset_v3.ipynb`)
+
+Combine existing v2 data + newly annotated scraped images:
+
+- [ ] Load corrected scraped images (excluding flagged-as-excluded)
+- [ ] Merge with existing v2 real data (382 images)
+- [ ] Re-split all real images: 80/10/10 by base image name (stratified by source)
+- [ ] Keep synthetic data unchanged (2500/500/500) for stage 1 pre-training
+- [ ] Push as `kaya-go/moku-v3` on HF Hub (real + synthetic configs)
+- [ ] Update `src/moku/dataset.py` with v3 build utilities
+
+### Phase 5 — v3 Training
+
+Two-stage training (same strategy as v2, re-tuned for larger dataset):
+
+- [ ] Stage 1: synthetic pre-train (reuse v2 stage 1 checkpoint or re-train)
+- [ ] Stage 2: real fine-tune on v3 dataset
+- [ ] With 3–5× more real data, may need fewer epochs (200–500 vs 1000)
+- [ ] LR re-sweep: start from v2 best (lr=3e-4 or 4e-4, linear/cosine_with_min_lr)
+- [ ] Evaluate on v3 test set + v2 test set (backward compatibility check)
+
+### v3 Milestones
+
+| # | Milestone | Status |
+|---|-----------|--------|
+| 1 | Scraper code (`src/moku/scraper.py`) | not started |
+| 2 | Scrape images notebook (`05_Scrape_Images.ipynb`) | not started |
+| 3 | Pseudo-labeling notebook (`06_Pseudo_Label.ipynb`) | not started |
+| 4 | Annotator: add exclude/skip feature | not started |
+| 5 | Manual correction pass | not started |
+| 6 | Build v3 dataset (`07_Build_Dataset_v3.ipynb`) | not started |
+| 7 | v3 training round | not started |
 
 ---
 
@@ -196,13 +277,17 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 |------|--------|
 | `src/moku/model.py` | Model loading, eval transforms, collation utilities |
 | `src/moku/runs.py` | W&B API utilities (fetch runs, artifacts, load models) |
-| `src/moku/dataset.py` | Fix go-chess corners, dataset harmonization |
+| `src/moku/dataset.py` | Fix go-chess corners, dataset harmonization, v3 build |
 | `src/moku/synthetic.py` | Synthetic goban generator |
+| `src/moku/scraper.py` | **NEW** — Flickr / Reddit / Wikimedia image scraper |
 | `scripts/train.py` | Two-stage training, W&B artifact saving |
-| `tools/annotator/` | HTML/JS annotator app |
+| `tools/annotator/` | HTML/JS annotator app + exclude/skip feature |
+| `notebooks/05_Scrape_Images.ipynb` | **NEW** — Run scraper, preview, deduplicate |
+| `notebooks/06_Pseudo_Label.ipynb` | **NEW** — Pseudo-label scraped images with v2 model |
+| `notebooks/07_Build_Dataset_v3.ipynb` | **NEW** — Merge v2 + scraped → v3 dataset |
 | `notebooks/10_Train_Model.ipynb` | Two-stage training (local test + HF Jobs) |
 | `notebooks/20_Analyze_Runs.ipynb` | W&B run analysis (loss/mAP curves) |
-| `notebooks/22_Evaluate_v2.ipynb` | mAP + center-distance eval (HF Hub or W&B artifacts) |
+| `notebooks/21_Evaluate.ipynb` | mAP + center-distance eval (HF Hub or W&B artifacts) |
 | `notebooks/30_Publish_Model.ipynb` | Select W&B artifact → push to HF Hub |
 | `notebooks/40_Export_ONNX.ipynb` | ONNX export for browser inference |
 
@@ -237,3 +322,7 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 | 2026-03-16 | Include lr=3e-4 in R6 grid | EMA-smoothed analysis showed r5_lr3e-4_cos had higher mean mAP than lr=4e-4 despite lower raw max |
 | 2026-03-16 | Keep batch_size=32 (not 64) | 382 train images / 64 = 6 steps/epoch — too few for stable gradient estimation |
 | 2026-03-16 | Create `scripts/analyze_runs.py` | Reusable W&B analysis with EMA smoothing and plateau detection; replaces ad-hoc notebook/scripts |
+| 2026-03-22 | v3 data-centric strategy: scrape + pseudo-label + correct | HP tuning saturated on 382 images; more real data is the only remaining lever for mAP gains |
+| 2026-03-22 | Scrape sources: Flickr CC, Reddit r/baduk, Wikimedia | Free, diverse, real-world images; CC/public domain licenses |
+| 2026-03-22 | Add exclude/skip to annotator | Pseudo-labeled scraped images include non-goban images that must be filtered out during correction |
+| 2026-03-22 | Keep synthetic pre-train for v3 | Two-stage training proved its value (corner AP +50%); reuse v2 stage 1 or re-train |
