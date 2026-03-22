@@ -529,32 +529,50 @@ def apply_corner_corrections(dataset: DatasetDict, corrections: dict) -> Dataset
 
 def load_annotated_generated(
     images_dir: Path,
-    corrections_path: Path,
     images_json_path: Path,
+    corrections_path: Path | None = None,
 ) -> Dataset:
-    """Load human-corrected annotations for generated (e.g. Gemini) images.
+    """Load annotations for generated (e.g. Gemini) images.
+
+    When ``corrections_path`` is provided and exists, only images present in
+    that file are included (with human-corrected boxes).  Otherwise, all
+    per-image JSON files in ``images_dir`` are loaded directly.
 
     Args:
-        images_dir: Directory containing the image files.
-        corrections_path: Path to ``corrected.json`` from the annotator.
+        images_dir: Directory containing the image files and per-image JSONs.
         images_json_path: Path to ``images.json`` with image metadata.
+        corrections_path: Optional path to ``corrected.json`` from the
+            annotator.  If ``None`` or the file does not exist, original
+            annotations from the per-image JSONs are used instead.
 
     Returns:
         An HF ``Dataset`` with the same schema as real/synthetic datasets.
-        Only images present in ``corrections_path`` are included.
     """
-    with open(corrections_path) as f:
-        corrections = json.load(f)
     with open(images_json_path) as f:
         images_meta = json.load(f)
 
     # Build width/height lookup from images.json
     meta_lookup = {img["filename"]: img for img in images_meta["images"]}
 
+    use_corrections = corrections_path is not None and Path(corrections_path).exists()
+
+    if use_corrections:
+        with open(corrections_path) as f:
+            corrections = json.load(f)
+        entries = sorted(corrections.items())
+    else:
+        # Load per-image JSON files from images_dir
+        entries = []
+        for json_path in sorted(images_dir.glob("*.json")):
+            with open(json_path) as f:
+                data = json.load(f)
+            filename = data["image"]["filename"]
+            entries.append((filename, data))
+
     rows = []
     ann_id = 0
-    for i, (filename, corr) in enumerate(sorted(corrections.items())):
-        if corr.get("excluded"):
+    for i, (filename, corr) in enumerate(entries):
+        if isinstance(corr, dict) and corr.get("excluded"):
             continue
 
         meta = meta_lookup.get(filename, {})

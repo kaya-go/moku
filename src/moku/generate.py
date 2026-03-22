@@ -17,17 +17,20 @@ from PIL import Image
 # Style-transfer prompt building blocks for synthetic → photorealistic
 # ---------------------------------------------------------------------------
 
+# (material, weight) — ~50% wood, rest is diverse
 BOARD_MATERIALS = [
-    "natural wood with visible grain texture",
-    "light bamboo with fine grain",
-    "dark walnut wood with rich grain",
-    "maple wood with subtle grain",
-    "plastic board with a matte finish",
-    "thick glass board with a smooth surface",
-    "aluminum board with a brushed metal finish",
-    "lacquered wood with a glossy surface",
-    "aged kaya wood with deep golden tones",
+    ("natural wood with visible grain texture", 3),
+    ("light bamboo with fine grain", 2),
+    ("dark walnut wood with rich grain", 3),
+    ("maple wood with subtle grain", 2),
+    ("plastic board with a matte finish", 1),
+    ("thick glass board with a smooth surface", 1),
+    ("aluminum board with a brushed metal finish", 1),
+    ("lacquered wood with a glossy surface", 2),
+    ("aged kaya wood with deep golden tones", 3),
 ]
+_BOARD_MATERIAL_NAMES = [m for m, _ in BOARD_MATERIALS]
+_BOARD_MATERIAL_WEIGHTS = [w for _, w in BOARD_MATERIALS]
 
 STONE_MATERIALS = [
     "smooth, round, and slightly convex shell and slate stones",
@@ -113,7 +116,7 @@ def make_style_transfer_prompt(board_size: int) -> str:
     """
     prompt = _STYLE_PROMPT_TEMPLATE.format(
         board_size=board_size,
-        board_material=random.choice(BOARD_MATERIALS),
+        board_material=random.choices(_BOARD_MATERIAL_NAMES, weights=_BOARD_MATERIAL_WEIGHTS, k=1)[0],
         stone_material=random.choice(STONE_MATERIALS),
         surface=random.choice(STYLE_SURFACES),
         lighting=random.choice(STYLE_LIGHTINGS),
