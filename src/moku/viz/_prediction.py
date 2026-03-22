@@ -9,6 +9,10 @@ import matplotlib.pyplot as plt
 
 from moku.viz._constants import CATEGORY_COLORS, CATEGORY_LINEWIDTHS
 
+CORNER_CATEGORY_ID = 2
+CORNER_TOP_K = 4
+CORNER_MIN_SCORE = 0.01
+
 
 def _get_raw_sample(ds_split, idx: int) -> dict:
     """Retrieve a raw (untransformed) sample from a HF Dataset split.
@@ -52,11 +56,31 @@ def render_prediction(
         outputs = model(**inputs)
 
     orig_size = torch.tensor([[image.height, image.width]], device=device)
-    results = image_processor.post_process_object_detection(outputs, target_sizes=orig_size, threshold=threshold)[0]
+    # Use low floor so corner candidates are not discarded
+    floor = min(threshold, CORNER_MIN_SCORE)
+    results = image_processor.post_process_object_detection(outputs, target_sizes=orig_size, threshold=floor)[0]
 
-    pred_boxes = results["boxes"].cpu().numpy()
-    pred_labels = results["labels"].cpu().numpy()
-    pred_scores = results["scores"].cpu().numpy()
+    all_boxes = results["boxes"].cpu().numpy()
+    all_labels = results["labels"].cpu().numpy()
+    all_scores = results["scores"].cpu().numpy()
+
+    # Split: stones filtered by threshold, corners by top-K
+    import numpy as np
+
+    is_corner = all_labels == CORNER_CATEGORY_ID
+    # Stones: apply user threshold
+    stone_mask = ~is_corner & (all_scores >= threshold)
+    # Corners: take top-K by score
+    corner_indices = np.where(is_corner)[0]
+    corner_order = corner_indices[np.argsort(-all_scores[corner_indices])]
+    corner_keep = corner_order[:CORNER_TOP_K]
+
+    keep = np.concatenate([np.where(stone_mask)[0], corner_keep])
+    keep.sort()
+    pred_boxes = all_boxes[keep]
+    pred_labels = all_labels[keep]
+    pred_scores = all_scores[keep]
+    n_corners_shown = len(corner_keep)
 
     fig, (ax_gt, ax_pred) = plt.subplots(1, 2, figsize=(16, 7))
 
@@ -89,7 +113,11 @@ def render_prediction(
             color="white",
             bbox=dict(boxstyle="round,pad=0.15", facecolor=color, alpha=0.7),
         )
-    ax_pred.set_title(f"Predictions ({len(pred_boxes)} detections, thr={threshold})", fontsize=10)
+    n_stones = int((pred_labels != CORNER_CATEGORY_ID).sum())
+    ax_pred.set_title(
+        f"Predictions ({n_stones} stones thr={threshold}, {n_corners_shown} corners top-{CORNER_TOP_K})",
+        fontsize=10,
+    )
     ax_pred.axis("off")
 
     plt.tight_layout()
@@ -202,6 +230,10 @@ def browse_predictions(
             f"<b>Dataset:</b> {dataset_selector.value} &nbsp;|&nbsp; "
             f"<b>Split:</b> {split} &nbsp;|&nbsp; "
             f"<b>Index:</b> {idx}/{len(ds[split]) - 1}"
+            f"<br/><span style='color: #888; font-size: 11px'>"
+            f"Stones: threshold filter &nbsp;|&nbsp; "
+            f"Corners: top-{CORNER_TOP_K} by score (min {CORNER_MIN_SCORE})"
+            f"</span>"
             f"</div>"
         )
 

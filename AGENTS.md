@@ -42,8 +42,7 @@ moku/
 │   ├── 03_Annotate.ipynb      # Corner annotation workflow
 │   ├── 04_Synthetic_Preview.ipynb # Synthetic data preview
 │   ├── 20_Analyze_Runs.ipynb  # W&B run analysis (loss/mAP curves, ranking)
-│   ├── 21_Evaluate.ipynb      # Model evaluation v1 (deprecated)
-│   ├── 22_Evaluate_v2.ipynb   # Model evaluation v2 (mAP, center-distance)
+│   ├── 21_Evaluate.ipynb      # Model evaluation (mAP, center-distance)
 │   ├── 30_Publish_Model.ipynb # Select W&B artifact → push to HF Hub
 │   └── 40_Export_ONNX.ipynb   # ONNX export for browser inference
 ├── scripts/
@@ -69,7 +68,7 @@ moku/
 1. **Dataset** (`01_Build_Dataset.ipynb`, `02_Build_Dataset_v2.ipynb`): Harmonize raw COCO datasets into HF datasets (`kaya-go/moku-v1`, `kaya-go/moku-v2`).
 2. **Train** (`scripts/train.py`): Fine-tune RT-DETR r18vd via HF Jobs. Two-stage: synthetic pre-train → real fine-tune. Best weights saved as W&B artifacts.
 3. **Analyze** (`20_Analyze_Runs.ipynb`): Fetch W&B run metrics, plot loss/mAP curves, rank runs.
-4. **Evaluate** (`22_Evaluate_v2.ipynb`): Validate model with mAP and center-distance metrics on test set. Supports loading from HF Hub branches or W&B artifacts.
+4. **Evaluate** (`21_Evaluate.ipynb`): Validate model with mAP and center-distance metrics on test set. Supports loading from HF Hub branches or W&B artifacts.
 5. **Publish** (`30_Publish_Model.ipynb`): Select best W&B artifact and push to HF Hub as official model.
 6. **Export** (`40_Export_ONNX.ipynb`): Convert to ONNX with dynamic axes for batch size. Upload to HF Hub.
 

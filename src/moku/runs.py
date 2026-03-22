@@ -118,6 +118,8 @@ def load_model_from_wandb(
     Returns:
         ``(image_processor, model)`` tuple.
     """
+    import logging
+
     import wandb
     from transformers import RTDetrForObjectDetection, RTDetrImageProcessor
 
@@ -129,7 +131,15 @@ def load_model_from_wandb(
         artifact_path = f"{entity}/{project}/{artifact_path}"
 
     artifact = api.artifact(artifact_path, type="model")
-    artifact_dir = artifact.download()
+
+    # Suppress wandb download logs
+    wandb_logger = logging.getLogger("wandb")
+    prev_level = wandb_logger.level
+    wandb_logger.setLevel(logging.ERROR)
+    try:
+        artifact_dir = artifact.download()
+    finally:
+        wandb_logger.setLevel(prev_level)
 
     ip = RTDetrImageProcessor.from_pretrained(artifact_dir)
     model = RTDetrForObjectDetection.from_pretrained(
