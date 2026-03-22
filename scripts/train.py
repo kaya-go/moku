@@ -84,11 +84,13 @@ class MAPEvalCallback(TrainerCallback):
         image_processor: RTDetrImageProcessor,
         threshold: float = 0.01,
         save_best_artifact: bool = False,
+        eval_batch_size: int = 64,
     ):
         self.eval_dataset = eval_dataset
         self.image_processor = image_processor
         self.threshold = threshold
         self.save_best_artifact = save_best_artifact
+        self.eval_batch_size = eval_batch_size
         self.best_map: float = 0.0
         self.trainer: Trainer | None = None
 
@@ -125,7 +127,9 @@ class MAPEvalCallback(TrainerCallback):
         cd_unmatched_gt: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
         cd_unmatched_pred: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
 
-        dataloader = torch.utils.data.DataLoader(self.eval_dataset, batch_size=8, collate_fn=collate_fn, shuffle=False)
+        dataloader = torch.utils.data.DataLoader(
+            self.eval_dataset, batch_size=self.eval_batch_size, collate_fn=collate_fn, shuffle=False
+        )
 
         for batch in dataloader:
             pixel_values = batch["pixel_values"].to(device)
@@ -481,7 +485,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--num-epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=4)
-    p.add_argument("--eval-batch-size", type=int, default=8)
+    p.add_argument("--eval-batch-size", type=int, default=64)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--warmup-ratio", type=float, default=0.1)
@@ -707,6 +711,7 @@ def main():
         dataset["validation"],
         image_processor,
         save_best_artifact=(report_to == "wandb" and not args.no_save_best_artifact),
+        eval_batch_size=args.eval_batch_size,
     )
     callbacks = [map_callback]
     if args.push_to_hub:
