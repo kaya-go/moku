@@ -16,24 +16,24 @@
 #     "numpy",
 # ]
 # ///
-"""Fine-tune RT-DETR r18vd on kaya-go/moku-v2 dataset.
+"""Fine-tune RT-DETR r18vd on kaya-go/moku dataset.
 
-Self-contained training script for HF Jobs. Supports two-stage training:
-  - Stage 1: Pre-train on synthetic data (--stage 1)
-  - Stage 2: Fine-tune on real data from a stage 1 checkpoint (--stage 2 --resume-from <model>)
+Self-contained training script for HF Jobs. Supports:
+  - Single-stage training on v3 (--stage 1 with default v3 dataset, no config)
+  - Two-stage training on v2: synthetic pre-train (--stage 1) + real fine-tune (--stage 2)
 
-Usage (local CPU test, stage 1):
+Usage (single-stage on v3, local CPU test):
     uv run scripts/train.py --stage 1 --num-epochs 2 --use-cpu
 
-Usage (HF Jobs, stage 1):
-    hf jobs uv run --detach --flavor a10g-small --timeout 3h \\
+Usage (single-stage on v3, HF Jobs):
+    hf jobs uv run --detach --flavor a10g-large --timeout 2h \\
         --secrets HF_TOKEN --secrets WANDB_API_KEY \\
-        scripts/train.py --stage 1 --run-name v2_stage1 --num-epochs 30 --push-to-hub
+        scripts/train.py --stage 1 --run-name r7_lr3e-4 --lr 3e-4 --num-epochs 500
 
-Usage (HF Jobs, stage 2 from stage 1 branch):
+Usage (two-stage on v2):
     hf jobs uv run --detach --flavor a10g-small --timeout 3h \\
         --secrets HF_TOKEN --secrets WANDB_API_KEY \\
-        scripts/train.py --stage 2 --run-name v2_stage2_lr2e-5 --lr 2e-5 --num-epochs 50
+        scripts/train.py --stage 1 --dataset kaya-go/moku-v2 --run-name v2_stage1
 
 Resume interrupted training:
     uv run scripts/train.py --stage 1 --run-name v2_stage1 --resume
@@ -62,7 +62,7 @@ from transformers import (
 # Constants
 # ---------------------------------------------------------------------------
 BASE_MODEL = "PekingU/rtdetr_r18vd"
-HF_DATASET = "kaya-go/moku-v2"
+HF_DATASET = "kaya-go/moku-v3"
 HF_MODEL = "kaya-go/moku-v2"
 STAGE1_REVISION = "stage1"
 
@@ -466,10 +466,19 @@ def collate_fn(batch: list[dict]) -> dict:
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Fine-tune RT-DETR on moku dataset (two-stage)")
-    p.add_argument("--stage", type=int, choices=[1, 2], default=1, help="Training stage: 1=synthetic, 2=real")
+    p.add_argument(
+        "--stage", type=int, choices=[1, 2], default=1, help="Training stage: 1=synthetic/single, 2=real (fine-tune)"
+    )
     p.add_argument("--resume-from", type=str, default=None, help="HF model ID or local path to resume from (stage 2)")
     p.add_argument("--resume", action="store_true", help="Resume interrupted training from last checkpoint")
     p.add_argument("--run-name", default="baseline", help="Name of the training run")
+    p.add_argument("--dataset", type=str, default=None, help="HF dataset ID (default: HF_DATASET constant)")
+    p.add_argument(
+        "--dataset-config",
+        type=str,
+        default=None,
+        help="Dataset config name (default: stage-based for v2, None for v3)",
+    )
     p.add_argument("--num-epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--eval-batch-size", type=int, default=8)
@@ -540,16 +549,31 @@ def main():
         os.environ.setdefault("WANDB_ENTITY", "hadim")
         os.environ.setdefault("WANDB_PROJECT", "moku")
 
-    # --- Determine dataset config and model source ---
+    # --- Determine dataset, config, and model source ---
+    hf_dataset = args.dataset or HF_DATASET
+
     if args.stage == 1:
-        config_name = "synthetic"
+        # Stage 1: train from COCO pretrained base model (fresh detection head)
+        # For v2: config="synthetic". For v3: no config (all data in default split).
+        if args.dataset_config is not None:
+            config_name = args.dataset_config or None  # empty string → None
+        elif "moku-v2" in hf_dataset:
+            config_name = "synthetic"
+        else:
+            config_name = None
         model_source = BASE_MODEL
         model_revision = None
         hub_revision = args.hub_revision or STAGE1_REVISION
         default_lr = 1e-4
         default_epochs = 30
     else:
-        config_name = "real"
+        # Stage 2: fine-tune from an existing checkpoint
+        if args.dataset_config is not None:
+            config_name = args.dataset_config or None
+        elif "moku-v2" in hf_dataset:
+            config_name = "real"
+        else:
+            config_name = None
         if args.resume_from:
             model_source = args.resume_from
             model_revision = None
@@ -565,14 +589,14 @@ def main():
     num_epochs = args.num_epochs if args.num_epochs != 50 or args.stage == 2 else default_epochs
 
     print(f"=== Stage {args.stage} Training ===")
-    print(f"Dataset config: {config_name}")
+    print(f"Dataset: {hf_dataset} (config={config_name})")
     print(f"Model source: {model_source} (revision={model_revision})")
     print(f"Hub target: {HF_MODEL} (revision={hub_revision})")
     print(f"LR: {lr}, Epochs: {num_epochs}")
 
     # --- Load dataset ---
-    print(f"\nLoading dataset: {HF_DATASET} ({config_name})")
-    dataset = load_dataset(HF_DATASET, config_name)
+    print(f"\nLoading dataset: {hf_dataset} (config={config_name})")
+    dataset = load_dataset(hf_dataset, config_name)
     print(dataset)
 
     # --- Load model & image processor ---
@@ -663,6 +687,8 @@ def main():
             config={
                 "stage": args.stage,
                 "round": args.round,
+                "dataset": hf_dataset,
+                "dataset_config": config_name,
                 "learning_rate": lr,
                 "lr_scheduler": args.lr_scheduler,
                 "lr_scheduler_kwargs": lr_scheduler_kwargs,
@@ -672,7 +698,6 @@ def main():
                 "warmup_ratio": args.warmup_ratio,
                 "max_grad_norm": args.max_grad_norm,
                 "model_source": model_source,
-                "dataset_config": config_name,
                 "hub_revision": hub_revision,
             },
             resume="allow",

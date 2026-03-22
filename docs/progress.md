@@ -205,16 +205,18 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 - [ ] Re-push with more images as annotation progresses
 
 **v3 data composition**:
-- **train**: v2 real train (~382) + generated annotated (112+) — val/test unchanged from v2
-- **synthetic**: unchanged from v2 (2500/500/500)
-- **HF Hub**: `kaya-go/moku-v3` with configs `real` + `synthetic`
+- **train**: v2 real train (~382) + generated annotated — val/test unchanged from v2
+- No synthetic split — only real + generated photorealistic images
+- **HF Hub**: `kaya-go/moku-v3` (single config, no sub-configs)
 
 ### Phase 4 — v3 Training
 
-- [ ] Compare two strategies:
-  - **A) Two-stage** (current): synthetic pre-train → real fine-tune
-  - **B) Single-stage**: concat(synthetic, real×3) with oversampling — avoids catastrophic forgetting
-- [ ] LR re-sweep from v2 best (lr=3e-4 or 4e-4)
+**Strategy chosen**: Single-stage training (COCO pretrained → fine-tune on all v3 data)
+- Simpler pipeline, no two-stage complexity
+- v3 dataset has enough real+generated data to train directly
+
+- [x] Update `scripts/train.py` with `--dataset` and `--dataset-config` args for v3 support
+- [ ] Round 7: first HP grid search on v3 (4 runs, 500 epochs)
 - [ ] Evaluate on v3 test set (same as v2 test set for direct comparison)
 
 ### v3 Milestones
@@ -226,8 +228,8 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 | 3 | Manual correction (112/500 annotated) | in progress |
 | 4 | `load_annotated_generated()` in dataset.py | done |
 | 5 | `07_Build_Dataset_v3.ipynb` notebook | done |
-| 6 | Build & push initial v3 dataset | not started |
-| 7 | v3 training round | not started |
+| 6 | Build & push v3 dataset | done |
+| 7 | Round 7: single-stage HP grid search | in progress |
 
 ---
 
@@ -287,3 +289,5 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 | 2026-03-22 | v3 test/val identical to v2 | Direct metric comparison between v2 and v3; new images go to train only |
 | 2026-03-22 | Keep synthetic pre-train for v3 | Two-stage training proved its value (corner AP +50%); reuse v2 stage 1 or re-train |
 | 2026-03-22 | Consider single-stage with oversampling as alternative | Avoids catastrophic forgetting; compare A/B with two-stage |
+| 2026-03-22 | v3 single-stage training over two-stage | v3 has enough real+generated data; simpler pipeline; no synthetic split to pre-train on |
+| 2026-03-22 | Round 7: broad LR sweep {1e-4, 3e-4, 5e-4} + linear/cosine_with_min_lr, 500ep | First round on v3; need to find right LR regime for single-stage from COCO pretrained |
