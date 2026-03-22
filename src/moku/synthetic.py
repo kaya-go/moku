@@ -340,6 +340,7 @@ def generate_synthetic_sample(
     perspective_strength: float = 0.08,
     apply_blur: bool = True,
     apply_vignette: bool = True,
+    margin_frac: float | None = None,
 ) -> tuple[Image.Image, dict]:
     """Generate a single synthetic goban image with COCO annotations.
 
@@ -353,11 +354,15 @@ def generate_synthetic_sample(
             (0 = none, 0.08 = subtle, 0.15 = moderate).
         apply_blur: Whether to apply slight Gaussian blur for realism.
         apply_vignette: Ignored (lighting is applied automatically).
+        margin_frac: Margin as fraction of image_size. ``None`` picks a
+            random value in [0.02, 0.15]. Use larger values (e.g. 0.25)
+            to leave room for context objects around the board.
 
     Returns:
         (PIL Image, COCO-style annotation dict)
     """
-    margin_frac = random.uniform(0.08, 0.15)
+    if margin_frac is None:
+        margin_frac = random.uniform(0.02, 0.15)
     margin = int(image_size * margin_frac)
     grid_span = image_size - 2 * margin
     cell_size = grid_span / (board_size - 1)
@@ -421,7 +426,7 @@ def generate_synthetic_sample(
     # 5. 3D perspective distortion (retry with reduced angles if corners leave bounds)
     if perspective_strength > 0:
         angle_range = perspective_strength * 70
-        corner_bbox_half = max(10, cell_size * 0.4) / 2
+        corner_bbox_half = max(10, cell_size * 0.8) / 2
         for attempt in range(10):
             scale = 1.0 / (1.0 + 0.3 * attempt)  # progressively reduce
             pitch = random.uniform(-angle_range * scale, angle_range * scale)
@@ -450,7 +455,7 @@ def generate_synthetic_sample(
     image = _apply_lighting(image)
 
     # 7. Build COCO annotations
-    corner_bbox_size = max(10, cell_size * 0.4)
+    corner_bbox_size = max(10, cell_size * 0.8)
     ann_id = 0
     objects: dict[str, list] = {"id": [], "bbox": [], "category": [], "area": [], "iscrowd": []}
 

@@ -41,9 +41,9 @@ moku/
 │   ├── 02_Build_Dataset_v2.ipynb # Dataset v2: corrected real + synthetic
 │   ├── 03_Annotate.ipynb      # Corner annotation workflow
 │   ├── 04_Synthetic_Preview.ipynb # Synthetic data preview
-│   ├── 05_Generate_Images.ipynb # Gemini image generation
-│   ├── 06_Annotate_Generated.ipynb # Pseudo-label + correct generated images
-│   ├── 07_Build_Dataset_v3.ipynb # Dataset v3: v2 + generated images
+│   ├── 05_Generate_Images.ipynb # Synthetic → photorealistic generation (Gemini style transfer)
+│   ├── 06_Annotate_Generated.ipynb # Verify inherited annotations from generation
+│   ├── 07_Build_Dataset_v3.ipynb # Dataset v3: v2 real + generated (no synthetic)
 │   ├── 21_Evaluate.ipynb      # Model evaluation (mAP, center-distance)
 │   ├── 30_Publish_Model.ipynb # Select W&B artifact → push to HF Hub
 │   └── 40_Export_ONNX.ipynb   # ONNX export for browser inference
@@ -59,7 +59,7 @@ moku/
 │   ├── cli.py                 # CLI entry point
 │   ├── dataset.py             # Dataset loading, harmonization, v3 build utilities
 │   ├── evaluation.py          # Evaluation utilities (mAP, center-distance, sweep)
-│   ├── generate.py            # Gemini image generation for goban photos
+│   ├── generate.py            # Synthetic → photorealistic style transfer (Gemini)
 │   ├── grid.py                # HP grid search helpers
 │   ├── model.py               # Model loading, eval transforms, collation utilities
 │   ├── runs.py                # W&B run fetching, artifact management
@@ -71,7 +71,7 @@ moku/
 
 ## Pipeline Overview
 
-1. **Dataset** (`01–07` notebooks): Harmonize raw COCO datasets, generate synthetic/Gemini images, annotate, and build HF datasets (`kaya-go/moku-v1`, `v2`, `v3`).
+1. **Dataset** (`01–07` notebooks): Harmonize raw COCO datasets, generate synthetic-conditioned photorealistic images via Gemini style transfer, verify annotations, and build HF datasets (`kaya-go/moku-v1`, `v2`, `v3`).
 2. **Train** (`scripts/train.py`): Fine-tune RT-DETR r18vd via HF Jobs. Two-stage: synthetic pre-train → real fine-tune. Best weights saved as W&B artifacts.
 3. **Analyze** (`scripts/analyze_runs.py`): Fetch W&B run metrics, compare key metrics (mAP@50, corner_R, stone_F1), plateau analysis.
 4. **Evaluate** (`21_Evaluate.ipynb`): Validate model with mAP and center-distance metrics on test set. Supports loading from HF Hub branches or W&B artifacts.
