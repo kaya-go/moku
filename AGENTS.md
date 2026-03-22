@@ -11,8 +11,8 @@ Your goal is to assist in building an object detection model that converts goban
 - **Purpose**: Object detection model for goban image recognition and SGF conversion.
 - **Target**: WebAssembly (WASM) via ONNX Runtime in the Kaya web app.
 - **HF Organization**: `kaya-go` on Hugging Face Hub.
-- **Dataset**: `kaya-go/moku-v1` on Hugging Face Hub.
-- **Model**: `kaya-go/moku-v1` (fine-tuned RT-DETR) on Hugging Face Hub.
+- **Dataset**: `kaya-go/moku-v1`, `kaya-go/moku-v2`, `kaya-go/moku-v3` on Hugging Face Hub.
+- **Model**: `kaya-go/moku-v2` (fine-tuned RT-DETR) on Hugging Face Hub.
 
 ## Tech Stack & Environment
 
@@ -41,6 +41,9 @@ moku/
 │   ├── 02_Build_Dataset_v2.ipynb # Dataset v2: corrected real + synthetic
 │   ├── 03_Annotate.ipynb      # Corner annotation workflow
 │   ├── 04_Synthetic_Preview.ipynb # Synthetic data preview
+│   ├── 05_Generate_Images.ipynb # Gemini image generation
+│   ├── 06_Annotate_Generated.ipynb # Pseudo-label + correct generated images
+│   ├── 07_Build_Dataset_v3.ipynb # Dataset v3: v2 + generated images
 │   ├── 21_Evaluate.ipynb      # Model evaluation (mAP, center-distance)
 │   ├── 30_Publish_Model.ipynb # Select W&B artifact → push to HF Hub
 │   └── 40_Export_ONNX.ipynb   # ONNX export for browser inference
@@ -52,11 +55,15 @@ moku/
 │   └── launch_grid_r6.sh      # HP grid search launcher (round 6)
 ├── src/moku/
 │   ├── __init__.py
+│   ├── annotator.py           # Annotator server utilities
 │   ├── cli.py                 # CLI entry point
-│   ├── dataset.py             # Dataset loading and harmonization utilities
+│   ├── dataset.py             # Dataset loading, harmonization, v3 build utilities
 │   ├── evaluation.py          # Evaluation utilities (mAP, center-distance, sweep)
-│   ├── runs.py                # W&B run fetching, artifact management
+│   ├── generate.py            # Gemini image generation for goban photos
+│   ├── grid.py                # HP grid search helpers
 │   ├── model.py               # Model loading, eval transforms, collation utilities
+│   ├── runs.py                # W&B run fetching, artifact management
+│   ├── synthetic.py           # Synthetic goban image generator
 │   └── viz/                   # Visualization utilities
 ├── pixi.toml
 └── pyproject.toml
@@ -64,7 +71,7 @@ moku/
 
 ## Pipeline Overview
 
-1. **Dataset** (`01_Build_Dataset.ipynb`, `02_Build_Dataset_v2.ipynb`): Harmonize raw COCO datasets into HF datasets (`kaya-go/moku-v1`, `kaya-go/moku-v2`).
+1. **Dataset** (`01–07` notebooks): Harmonize raw COCO datasets, generate synthetic/Gemini images, annotate, and build HF datasets (`kaya-go/moku-v1`, `v2`, `v3`).
 2. **Train** (`scripts/train.py`): Fine-tune RT-DETR r18vd via HF Jobs. Two-stage: synthetic pre-train → real fine-tune. Best weights saved as W&B artifacts.
 3. **Analyze** (`scripts/analyze_runs.py`): Fetch W&B run metrics, compare key metrics (mAP@50, corner_R, stone_F1), plateau analysis.
 4. **Evaluate** (`21_Evaluate.ipynb`): Validate model with mAP and center-distance metrics on test set. Supports loading from HF Hub branches or W&B artifacts.

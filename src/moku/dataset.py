@@ -525,3 +525,70 @@ def apply_corner_corrections(dataset: DatasetDict, corrections: dict) -> Dataset
         return _apply
 
     return DatasetDict({split: ds.map(_make_apply(split), with_indices=True) for split, ds in dataset.items()})
+
+
+def load_annotated_generated(
+    images_dir: Path,
+    corrections_path: Path,
+    images_json_path: Path,
+) -> Dataset:
+    """Load human-corrected annotations for generated (e.g. Gemini) images.
+
+    Args:
+        images_dir: Directory containing the image files.
+        corrections_path: Path to ``corrected.json`` from the annotator.
+        images_json_path: Path to ``images.json`` with image metadata.
+
+    Returns:
+        An HF ``Dataset`` with the same schema as real/synthetic datasets.
+        Only images present in ``corrections_path`` are included.
+    """
+    with open(corrections_path) as f:
+        corrections = json.load(f)
+    with open(images_json_path) as f:
+        images_meta = json.load(f)
+
+    # Build width/height lookup from images.json
+    meta_lookup = {img["filename"]: img for img in images_meta["images"]}
+
+    rows = []
+    ann_id = 0
+    for i, (filename, corr) in enumerate(sorted(corrections.items())):
+        if corr.get("excluded"):
+            continue
+
+        meta = meta_lookup.get(filename, {})
+        width = meta.get("width", 1024)
+        height = meta.get("height", 1024)
+        image_path = str(images_dir / filename)
+
+        boxes = corr.get("boxes", [])
+        objects = {
+            "id": [],
+            "bbox": [],
+            "category": [],
+            "area": [],
+            "iscrowd": [],
+        }
+        for box in boxes:
+            objects["id"].append(ann_id)
+            objects["bbox"].append([box["x"], box["y"], box["w"], box["h"]])
+            objects["category"].append(box["category"])
+            objects["area"].append(box["w"] * box["h"])
+            objects["iscrowd"].append(0)
+            ann_id += 1
+
+        rows.append(
+            {
+                "image": image_path,
+                "image_id": i,
+                "width": width,
+                "height": height,
+                "source_dataset": "generated",
+                "objects": objects,
+            }
+        )
+
+    ds = Dataset.from_list(rows)
+    ds = ds.cast_column("image", HFImage())
+    return ds

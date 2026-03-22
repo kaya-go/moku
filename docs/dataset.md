@@ -150,3 +150,39 @@ Replaces the v1 horizontal-flip-only pipeline with albumentations:
 3. Scrape + pseudo-label + correct real images with `notebooks/06_Pseudolabel.ipynb`
 4. Combine all sources with the same stratified 80/10/10 re-split
 5. Push `kaya-go/moku-v2` to HF Hub via updated `notebooks/01_Build_Dataset.ipynb`
+
+---
+
+## Dataset v3: kaya-go/moku-v3
+
+### Motivation
+
+v2 model reaches mAP@50:95 ~0.60 (best R5/R6 runs). HP tuning is saturated on 382 real images — more diverse data is the main remaining lever.
+
+### v3 Data Sources
+
+| Source | Type | Approx. size | Notes |
+|--------|------|-------------|-------|
+| v2 real (all splits) | Real images | ~382 | Unchanged from v2 |
+| v2 synthetic (all splits) | Synthetic | 2500/500/500 | Unchanged from v2 |
+| Gemini-generated | Generated, human-corrected | 112+ (of 500) | `data/annotate_generated/`, annotation in progress |
+
+### v3 Split Strategy
+
+**Key constraint**: Test and validation sets are **identical** to v2 for direct metric comparison.
+
+- **test**: v2 real test (unchanged)
+- **validation**: v2 real validation (unchanged)
+- **train**: v2 real train + all annotated generated images
+
+Generated images are added to train only. As more images are annotated, the dataset is re-pushed.
+
+### v3 Build Process
+
+1. Load `kaya-go/moku-v2` (real + synthetic configs) from HF Hub
+2. Load annotated generated images from `data/annotate_generated/corrected.json` via `load_annotated_generated()`
+3. Concatenate generated images into v2 real train split
+4. Keep val/test/synthetic unchanged
+5. Push as `kaya-go/moku-v3` on HF Hub (configs: `real`, `synthetic`)
+
+Built via `notebooks/07_Build_Dataset_v3.ipynb`.
