@@ -45,9 +45,9 @@ def plot_model_comparison(
 
     ax.set_xticks(x + width * (n_models - 1) / 2)
     ax.set_xticklabels(metrics)
-    ax.set_ylim(0, 1.1)
+    ax.set_ylim(0, 1.4)
     ax.set_title(title)
-    ax.legend(fontsize=7, loc="upper right")
+    ax.legend(fontsize=7)
     fig.tight_layout()
     plt.show()
 
