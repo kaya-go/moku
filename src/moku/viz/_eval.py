@@ -12,7 +12,8 @@ def plot_model_comparison(
     metrics: list[str] | None = None,
     title: str = "Model Comparison",
     figsize: tuple[float, float] = (8, 4),
-) -> None:
+    color_map: dict[str, str | tuple] | None = None,
+) -> dict[str, str | tuple]:
     """Grouped bar chart comparing models on key metrics.
 
     Args:
@@ -20,6 +21,11 @@ def plot_model_comparison(
         metrics: Column names to plot. Defaults to all numeric columns.
         title: Chart title.
         figsize: Figure size.
+        color_map: Optional mapping of model name → color. If provided, models
+            use consistent colors across plots. Missing models get new colors.
+
+    Returns:
+        Color map (model name → color) that can be passed to subsequent calls.
     """
     if metrics is None:
         metrics = [c for c in summary_df.columns if c != "model" and pd.api.types.is_numeric_dtype(summary_df[c])]
@@ -29,10 +35,20 @@ def plot_model_comparison(
     x = np.arange(n_metrics)
     width = 0.8 / n_models
 
+    # Build/extend color map
+    cmap = plt.get_cmap("tab10")
+    if color_map is None:
+        color_map = {}
+    next_idx = len(color_map)
+    for _, row in summary_df.iterrows():
+        if row["model"] not in color_map:
+            color_map[row["model"]] = cmap(next_idx % 10)
+            next_idx += 1
+
     fig, ax = plt.subplots(figsize=figsize)
     for i, (_, row) in enumerate(summary_df.iterrows()):
         vals = [row[m] for m in metrics]
-        bars = ax.bar(x + i * width, vals, width, label=row["model"])
+        bars = ax.bar(x + i * width, vals, width, label=row["model"], color=color_map[row["model"]])
         for bar, v in zip(bars, vals):
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
@@ -50,6 +66,7 @@ def plot_model_comparison(
     ax.legend(fontsize=7)
     fig.tight_layout()
     plt.show()
+    return color_map
 
 
 def plot_threshold_sweep(
