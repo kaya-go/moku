@@ -33,7 +33,7 @@ var HIT_PADDING  = 6;
 var CAT_COLORS = {
   0: '#ec4899',
   1: '#14b8a6',
-  2: '#f97316',
+  2: '#00ff00',
 };
 var CAT_NAMES = { 0: 'black', 1: 'white', 2: 'corner' };
 
@@ -64,7 +64,8 @@ var lockedId     = null;  // corner locked to mouse cursor
 
 var mouseScreenX = 0, mouseScreenY = 0;
 var magEnabled   = true;
-var scoreThreshold = 0.0;
+var mouseOverCanvas = false;
+var scoreThreshold = 0.05;
 
 var canvas, ctx, magCanvas, magCtx, currentImg;
 var canvasWrap;
@@ -84,6 +85,7 @@ window.onload = function() {
   canvas.addEventListener('mousemove',   onMouseMove);
   canvas.addEventListener('mouseup',     onMouseUp);
   canvas.addEventListener('mouseleave',  onMouseLeave);
+  canvas.addEventListener('mouseenter',  function() { mouseOverCanvas = true; });
   canvas.addEventListener('contextmenu', onRightClick);
   canvasWrap.addEventListener('wheel',   onWheel, { passive: false });
 
@@ -150,9 +152,28 @@ async function loadImage(filteredPos) {
 
   document.getElementById('image-name').textContent = img.filename || '';
 
+  // Reset threshold to 0 for corrected images (no scores), default for uncorrected
+  if (img.annotated) {
+    scoreThreshold = 0;
+    document.getElementById('threshold-value').textContent = '0.000';
+  } else {
+    scoreThreshold = 0.03;
+    document.getElementById('threshold-value').textContent = '0.030';
+  }
+
   var annResp = await fetch('/api/annotations/' + encodeURIComponent(img.filename));
   var annData = await annResp.json();
   currentAnns = (annData.boxes || []).map(function(b) { return Object.assign({}, b); });
+
+  // Auto-trim corners: keep only top-4 by score
+  var corners = currentAnns.filter(function(b) { return b.category === CAT_CORNER && b.score !== undefined; });
+  if (corners.length > MAX_CORNERS) {
+    corners.sort(function(a, b) { return b.score - a.score; });
+    var keep = new Set(corners.slice(0, MAX_CORNERS).map(function(b) { return b.id; }));
+    currentAnns = currentAnns.filter(function(b) {
+      return b.category !== CAT_CORNER || b.score === undefined || keep.has(b.id);
+    });
+  }
 
   var imgEl = new Image();
   imgEl.onload = function() {
@@ -221,7 +242,7 @@ function render() {
     var cy = box.y + box.h / 2;
 
     ctx.strokeStyle = color;
-    ctx.lineWidth   = sel ? 3 : 1.5;
+    ctx.lineWidth   = sel ? 4 : 2.5;
 
     if (box.category === CAT_CORNER) {
       ctx.strokeRect(box.x, box.y, box.w, box.h);
@@ -270,7 +291,7 @@ function render() {
 }
 
 function renderMagnifier() {
-  if (!currentImg || !magEnabled) {
+  if (!currentImg || !magEnabled || !mouseOverCanvas) {
     document.getElementById('mag-wrap').style.display = 'none';
     return;
   }
@@ -368,7 +389,7 @@ function getCurrentImage() {
 function visibleAnns() {
   if (scoreThreshold <= 0) return currentAnns;
   return currentAnns.filter(function(b) {
-    return b.score === undefined || b.score >= scoreThreshold;
+    return b.category === CAT_CORNER || b.score === undefined || b.score >= scoreThreshold;
   });
 }
 
@@ -531,6 +552,7 @@ function onMouseUp(e) {
 }
 
 function onMouseLeave() {
+  mouseOverCanvas = false;
   document.getElementById('mag-wrap').style.display = 'none';
   isPanning = false;
   isDragging = false;
@@ -642,13 +664,11 @@ function addAnnotation(imgX, imgY) {
     return;
   }
 
-  // For stones, use average size of existing same-category annotations
-  if (cat !== CAT_CORNER) {
-    var sameCategory = visibleAnns().filter(function(b) { return b.category === cat; });
-    if (sameCategory.length > 0) {
-      var avgSize = sameCategory.reduce(function(s, b) { return s + Math.max(b.w, b.h); }, 0) / sameCategory.length;
-      size = Math.round(avgSize);
-    }
+  // Use average size of existing same-category annotations
+  var sameCategory = visibleAnns().filter(function(b) { return b.category === cat; });
+  if (sameCategory.length > 0) {
+    var avgSize = sameCategory.reduce(function(s, b) { return s + Math.max(b.w, b.h); }, 0) / sameCategory.length;
+    size = Math.round(avgSize);
   }
 
   var newId = Date.now() + Math.floor(Math.random() * 1000);
@@ -704,10 +724,10 @@ function trimCorners() {
   showToast('Trimmed to top ' + MAX_CORNERS + ' corners');
 }
 
-function onScoreThresholdChange(val) {
+function stepThreshold(delta) {
   var oldThreshold = scoreThreshold;
-  scoreThreshold = parseFloat(val) || 0;
-  document.getElementById('threshold-value').textContent = scoreThreshold.toFixed(2);
+  scoreThreshold = Math.max(0, Math.min(1, parseFloat((scoreThreshold + delta).toFixed(3))));
+  document.getElementById('threshold-value').textContent = scoreThreshold.toFixed(3);
   var nHidden = currentAnns.length - visibleAnns().length;
   if (nHidden > 0 && scoreThreshold !== oldThreshold) markDirty();
   render();
@@ -716,8 +736,42 @@ function onScoreThresholdChange(val) {
   setStatus();
 }
 
-// ---------------------------------------------------------------------------
-// Navigation
+function autoThreshold() {
+  // Collect stone scores (exclude corners — those are always shown)
+  var scores = currentAnns
+    .filter(function(b) { return b.category !== CAT_CORNER && b.score !== undefined; })
+    .map(function(b) { return b.score; });
+  if (scores.length < 2) {
+    showToast('Not enough scored detections', 'error');
+    return;
+  }
+  scores.sort(function(a, b) { return b - a; }); // descending
+
+  // Find the largest relative gap between consecutive scores
+  var bestGap = 0;
+  var bestIdx = 0;
+  for (var i = 0; i < scores.length - 1; i++) {
+    var gap = scores[i] - scores[i + 1];
+    // Weight gap by position: prefer gaps among higher scores
+    var weightedGap = gap * (1 + scores[i]);
+    if (weightedGap > bestGap) {
+      bestGap = weightedGap;
+      bestIdx = i;
+    }
+  }
+
+  // Set threshold just below the last "good" score
+  var newThreshold = Math.max(0.001, parseFloat(((scores[bestIdx] + scores[bestIdx + 1]) / 2).toFixed(3)));
+  scoreThreshold = newThreshold;
+  document.getElementById('threshold-value').textContent = scoreThreshold.toFixed(3);
+  var kept = scores.filter(function(s) { return s >= newThreshold; }).length;
+  showToast('Auto: ' + kept + ' stones kept (threshold=' + newThreshold.toFixed(3) + ')');
+  markDirty();
+  render();
+  renderMagnifier();
+  renderAnnPanel();
+  setStatus();
+}
 // ---------------------------------------------------------------------------
 
 var _dirty = false;

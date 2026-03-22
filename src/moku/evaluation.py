@@ -383,3 +383,37 @@ def sweep_confidence_threshold(
         "map": map_values,
         "map_50": map_50_values,
     }
+
+
+def find_optimal_threshold(
+    sweep: dict,
+    metric: str = "f1",
+) -> dict:
+    """Find optimal score thresholds from a confidence sweep.
+
+    Args:
+        sweep: Output of ``sweep_confidence_threshold()``.
+        metric: Which metric to maximize (``"f1"``, ``"precision"``, or ``"recall"``).
+
+    Returns a dict with:
+        - macro: best threshold and metric value for macro-averaged metric
+        - per_class: dict[class_name] -> {threshold, value} for each class
+    """
+    thresholds = sweep["score_thresholds"]
+
+    # Macro
+    values = sweep["macro"][metric]
+    best_idx = int(np.argmax(values))
+    result: dict = {
+        "metric": metric,
+        "macro": {"threshold": round(thresholds[best_idx], 4), "value": round(values[best_idx], 4)},
+        "per_class": {},
+    }
+
+    # Per class
+    for name, data in sweep["per_class"].items():
+        vals = data[metric]
+        ci = int(np.argmax(vals))
+        result["per_class"][name] = {"threshold": round(thresholds[ci], 4), "value": round(vals[ci], 4)}
+
+    return result
