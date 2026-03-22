@@ -107,6 +107,7 @@ class MAPEvalCallback(TrainerCallback):
 
         if model is None:
             return
+        from scipy.optimize import linear_sum_assignment
         from torchmetrics.detection import MeanAveragePrecision
 
         device = next(model.parameters()).device
@@ -118,6 +119,11 @@ class MAPEvalCallback(TrainerCallback):
             max_detection_thresholds=[1, 10, 400],
             backend="faster_coco_eval",
         )
+
+        # Center-distance accumulators (2% of image diagonal)
+        cd_matches: dict[int, list[tuple[float, float]]] = {i: [] for i in ID_TO_CATEGORY}
+        cd_unmatched_gt: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
+        cd_unmatched_pred: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
 
         dataloader = torch.utils.data.DataLoader(self.eval_dataset, batch_size=8, collate_fn=collate_fn, shuffle=False)
 
@@ -150,15 +156,64 @@ class MAPEvalCallback(TrainerCallback):
 
             metric.update(preds, targets)
 
+            # Center-distance matching per image
+            for pred, tgt, lab in zip(preds, targets, labels):
+                orig_h, orig_w = lab["orig_size"]
+                img_diag = float((orig_h**2 + orig_w**2) ** 0.5)
+
+                p_cx = (pred["boxes"][:, 0] + pred["boxes"][:, 2]) / 2
+                p_cy = (pred["boxes"][:, 1] + pred["boxes"][:, 3]) / 2
+                g_cx = (tgt["boxes"][:, 0] + tgt["boxes"][:, 2]) / 2
+                g_cy = (tgt["boxes"][:, 1] + tgt["boxes"][:, 3]) / 2
+
+                for cls_id in ID_TO_CATEGORY:
+                    gm = tgt["labels"] == cls_id
+                    pm = pred["labels"] == cls_id
+                    n_gt = int(gm.sum())
+                    n_pred = int(pm.sum())
+                    if n_gt == 0:
+                        cd_unmatched_pred[cls_id] += n_pred
+                        continue
+                    if n_pred == 0:
+                        cd_unmatched_gt[cls_id] += n_gt
+                        continue
+
+                    gc = torch.stack([g_cx[gm], g_cy[gm]], dim=-1).float()
+                    pc = torch.stack([p_cx[pm], p_cy[pm]], dim=-1).float()
+                    cost = torch.cdist(gc, pc)
+                    gi, pi = linear_sum_assignment(cost.numpy())
+                    for g, p in zip(gi, pi):
+                        cd_matches[cls_id].append((float(cost[g, p]), img_diag))
+                    cd_unmatched_gt[cls_id] += n_gt - len(gi)
+                    cd_unmatched_pred[cls_id] += n_pred - len(pi)
+
         result = metric.compute()
 
-        # Log mAP metrics so they appear in W&B
+        # Compute center-distance metrics at 2% threshold
+        cd_dt = 0.02
+        cd_per_class: dict[str, dict[str, float]] = {}
+        for cls_id, name in ID_TO_CATEGORY.items():
+            matches = cd_matches[cls_id]
+            tp = sum(1 for d, diag in matches if d / diag <= cd_dt)
+            fn = sum(1 for d, diag in matches if d / diag > cd_dt) + cd_unmatched_gt[cls_id]
+            fp = sum(1 for d, diag in matches if d / diag > cd_dt) + cd_unmatched_pred[cls_id]
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            cd_per_class[name] = {"precision": precision, "recall": recall, "f1": f1}
+
+        corner_r = cd_per_class["board_corner"]["recall"]
+        stone_f1 = np.mean([cd_per_class[c]["f1"] for c in ("black_stone", "white_stone")])
+
+        # Log mAP + center-distance metrics
         # Use eval_ prefix so Trainer's WandbCallback maps them to eval/ section
         map_metrics = {
             "eval_map": float(result.get("map", 0)),
             "eval_map_50": float(result.get("map_50", 0)),
             "eval_map_75": float(result.get("map_75", 0)),
             "eval_mar_400": float(result.get("mar_400", 0)),
+            "eval_corner_R": round(corner_r, 4),
+            "eval_stone_F1": round(float(stone_f1), 4),
         }
         if state.log_history:
             state.log_history[-1].update(map_metrics)
@@ -166,7 +221,8 @@ class MAPEvalCallback(TrainerCallback):
             self.trainer.log(map_metrics)
 
         print(
-            f"  mAP@50:95={map_metrics['eval_map']:.4f}  mAP@50={map_metrics['eval_map_50']:.4f}  mAP@75={map_metrics['eval_map_75']:.4f}  mAR@400={map_metrics['eval_mar_400']:.4f}"
+            f"  mAP@50={map_metrics['eval_map_50']:.4f}  corner_R={map_metrics['eval_corner_R']:.4f}  stone_F1={map_metrics['eval_stone_F1']:.4f}"
+            f"  (mAP@50:95={map_metrics['eval_map']:.4f})"
         )
 
         # Save best model as W&B artifact when mAP improves

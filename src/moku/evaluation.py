@@ -383,23 +383,3 @@ def sweep_confidence_threshold(
         "map": map_values,
         "map_50": map_50_values,
     }
-
-
-def format_center_distance_results(metrics: dict) -> pd.DataFrame:
-    """Format center-distance evaluation results as a DataFrame."""
-    rows = []
-    for name, data in metrics["per_class"].items():
-        row: dict = {
-            "category": name,
-            "n_gt": data["n_gt"],
-            "n_pred": data["n_pred"],
-            "matched": data["n_matched"],
-            "mean_dist_px": data["mean_dist_px"],
-            "median_dist_px": data["median_dist_px"],
-        }
-        for dt_label, dt_metrics in data["thresholds"].items():
-            row[f"P@{dt_label}"] = dt_metrics["precision"]
-            row[f"R@{dt_label}"] = dt_metrics["recall"]
-            row[f"F1@{dt_label}"] = dt_metrics["f1"]
-        rows.append(row)
-    return pd.DataFrame(rows)

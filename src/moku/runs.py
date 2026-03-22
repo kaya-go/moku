@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
-
 import pandas as pd
 
 WANDB_ENTITY = "hadim"
@@ -149,37 +147,3 @@ def load_model_from_wandb(
         label2id=CATEGORIES,
     )
     return ip, model
-
-
-def save_model_artifact(
-    model,
-    image_processor,
-    run_name: str,
-    metadata: dict | None = None,
-) -> None:
-    """Save model + image processor as a W&B artifact.
-
-    Must be called within an active ``wandb.run`` context.
-
-    Args:
-        model: The RTDetrForObjectDetection model.
-        image_processor: The RTDetrImageProcessor.
-        run_name: Used for artifact naming (``model-{run_name}``).
-        metadata: Extra metadata dict (epoch, eval_map, etc.).
-    """
-    import wandb
-
-    if wandb.run is None:
-        raise RuntimeError("No active W&B run. Call wandb.init() first.")
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model.save_pretrained(tmpdir)
-        image_processor.save_pretrained(tmpdir)
-
-        artifact = wandb.Artifact(
-            name=f"model-{run_name}",
-            type="model",
-            metadata=metadata or {},
-        )
-        artifact.add_dir(tmpdir)
-        wandb.log_artifact(artifact)

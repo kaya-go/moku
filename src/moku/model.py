@@ -19,17 +19,6 @@ def load_image_processor(model_name: str = BASE_MODEL) -> RTDetrImageProcessor:
     return RTDetrImageProcessor.from_pretrained(model_name)
 
 
-def load_model(model_name: str = BASE_MODEL) -> RTDetrForObjectDetection:
-    """Load RT-DETR model configured for moku's 3 categories."""
-    return RTDetrForObjectDetection.from_pretrained(
-        model_name,
-        num_labels=NUM_LABELS,
-        id2label=ID_TO_CATEGORY,
-        label2id=CATEGORIES,
-        ignore_mismatched_sizes=True,
-    )
-
-
 def _build_coco_target(example: dict) -> dict:
     """Convert a single HF dataset example to COCO annotation format."""
     return {

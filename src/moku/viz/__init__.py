@@ -6,14 +6,9 @@ from moku.viz._constants import (
     CATEGORY_LINEWIDTHS,
     HOSHI_POINTS,
 )
-from moku.viz._eval import (
-    extract_map_summary,
-    plot_center_distance_comparison,
-    plot_map_comparison,
-    plot_threshold_sweep,
-)
+from moku.viz._eval import plot_model_comparison, plot_threshold_sweep
 from moku.viz._prediction import browse_predictions, render_prediction
-from moku.viz._render import render_grid, render_sample, render_sample_with_grid
+from moku.viz._render import render_grid, render_sample_with_grid
 
 __all__ = [
     "CATEGORY_COLORS",
@@ -21,13 +16,10 @@ __all__ = [
     "HOSHI_POINTS",
     "browse_dataset",
     "browse_predictions",
-    "extract_map_summary",
-    "plot_center_distance_comparison",
-    "plot_map_comparison",
+    "plot_model_comparison",
     "plot_threshold_sweep",
     "render_grid",
     "render_prediction",
-    "render_sample",
     "render_sample_with_grid",
     "sample_metadata_html",
 ]

@@ -75,49 +75,6 @@ def render_grid(grid: np.ndarray, ax: plt.Axes | None = None) -> plt.Axes:
     return ax
 
 
-def render_sample(sample: dict, show_labels: bool = False, figsize: tuple = (10, 8), dpi: int = 100) -> bytes:
-    """Render a dataset sample with bounding boxes and return PNG bytes.
-
-    Args:
-        sample: A single row from the harmonized HF dataset.
-        show_labels: Whether to draw category labels on boxes.
-        figsize: Matplotlib figure size.
-        dpi: Output resolution.
-
-    Returns:
-        PNG image bytes.
-    """
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
-    ax.imshow(sample["image"])
-
-    for bbox, cat_id in zip(sample["objects"]["bbox"], sample["objects"]["category"]):
-        x, y, w, h = bbox
-        color = CATEGORY_COLORS.get(cat_id, "red")
-        lw = CATEGORY_LINEWIDTHS.get(cat_id, 2)
-        rect = patches.Rectangle((x, y), w, h, linewidth=lw, edgecolor=color, facecolor="none")
-        ax.add_patch(rect)
-
-        if show_labels:
-            label = ID_TO_CATEGORY[cat_id]
-            ax.text(
-                x,
-                y - 2,
-                label,
-                fontsize=7,
-                color="white",
-                bbox=dict(boxstyle="round,pad=0.2", facecolor=color, alpha=0.8),
-            )
-
-    ax.axis("off")
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
-
-
 def render_sample_with_grid(
     sample: dict,
     board_size: int = 19,
