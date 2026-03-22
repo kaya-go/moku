@@ -171,6 +171,17 @@ def _generate_gemini(
     return None
 
 
+async def generate_image_async(
+    client: genai.Client,
+    prompt: str,
+    *,
+    model: str = "gemini-3.1-flash-image-preview",
+) -> Image.Image | None:
+    """Async wrapper around generate_image using a thread pool."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, lambda: generate_image(client, prompt, model=model))
+
+
 def generate_batch(
     client: genai.Client,
     n: int,

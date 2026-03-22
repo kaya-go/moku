@@ -1,7 +1,7 @@
+import asyncio
 import json
 import os
 import re
-import time
 from pathlib import Path
 
 import typer
@@ -16,13 +16,23 @@ def generate(
     out_dir: Path = typer.Option(Path("data/generated"), "--out-dir", "-o", help="Output directory."),
     model: str = typer.Option("gemini-3.1-flash-image-preview", "--model", "-m", help="Model name."),
     prefix: str = typer.Option("gen", "--prefix", "-p", help="Filename prefix."),
-    delay: float = typer.Option(2.0, "--delay", "-d", help="Seconds between requests."),
+    workers: int = typer.Option(20, "--workers", "-w", help="Number of parallel requests."),
 ) -> None:
     """Generate goban images with AI. Resumable — skips already generated files."""
+    asyncio.run(_generate_async(n, out_dir, model, prefix, workers))
+
+
+async def _generate_async(
+    n: int,
+    out_dir: Path,
+    model: str,
+    prefix: str,
+    workers: int,
+) -> None:
     from dotenv import load_dotenv
     from google import genai
 
-    from moku.generate import generate_image, make_prompt
+    from moku.generate import generate_image_async, make_prompt
 
     load_dotenv()
 
@@ -45,9 +55,21 @@ def generate(
     if existing:
         typer.echo(f"Resuming — {len(existing)} images already exist, skipping them.")
 
-    generated = len(existing)
-    failures = 0
+    # Build list of indices to generate
+    indices: list[int] = []
     idx = 0
+    while len(indices) < n - len(existing):
+        if idx not in existing:
+            indices.append(idx)
+        idx += 1
+
+    if not indices:
+        typer.echo(f"All {n} images already exist. Nothing to do.")
+        raise typer.Exit(0)
+
+    semaphore = asyncio.Semaphore(workers)
+    generated = len(existing)
+    total_failures = 0
 
     progress = Progress(
         TextColumn("[bold blue]{task.description}"),
@@ -57,47 +79,45 @@ def generate(
         TimeRemainingColumn(),
     )
 
-    with progress:
-        task = progress.add_task("Generating", total=n, completed=generated)
+    async def _worker(target_idx: int) -> bool:
+        nonlocal generated, total_failures
 
-        while generated < n:
-            # Skip existing indices
-            while idx in existing:
-                idx += 1
+        prompt, board_size = make_prompt()
+        max_retries = 3
 
-            prompt, board_size = make_prompt()
-            progress.update(task, description=f"[{board_size}] idx={idx:04d}")
-
-            try:
-                img = generate_image(client, prompt, model=model)
-            except Exception as e:
-                failures += 1
-                progress.console.print(f"  [red]Error: {e}[/red]")
-                if failures >= 10:
-                    progress.console.print("[red]Too many consecutive failures, stopping.[/red]")
-                    raise typer.Exit(1)
-                time.sleep(delay * 2)
-                continue
+        for attempt in range(max_retries):
+            async with semaphore:
+                try:
+                    img = await generate_image_async(client, prompt, model=model)
+                except Exception as e:
+                    progress.console.print(f"  [red]Error idx={target_idx:04d}: {e}[/red]")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2**attempt)
+                        continue
+                    total_failures += 1
+                    return False
 
             if img is not None:
-                path = out_dir / f"{prefix}_{idx:04d}.png"
+                path = out_dir / f"{prefix}_{target_idx:04d}.png"
                 img.save(path)
-                progress.console.print(f"  Saved {path.name} ({img.size})")
                 generated += 1
-                failures = 0
-                idx += 1
                 progress.update(task, completed=generated)
-            else:
-                progress.console.print("  [yellow]No image returned, retrying...[/yellow]")
-                failures += 1
-                if failures >= 10:
-                    progress.console.print("[red]Too many consecutive failures, stopping.[/red]")
-                    raise typer.Exit(1)
+                return True
 
-            if generated < n:
-                time.sleep(delay)
+            # No image returned — retry
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)
 
-    typer.echo(f"Done — {generated} images in {out_dir}")
+        progress.console.print(f"  [yellow]No image for idx={target_idx:04d} after {max_retries} attempts[/yellow]")
+        total_failures += 1
+        return False
+
+    with progress:
+        task = progress.add_task(f"Generating (×{workers})", total=n, completed=generated)
+        tasks = [asyncio.create_task(_worker(i)) for i in indices]
+        await asyncio.gather(*tasks)
+
+    typer.echo(f"Done — {generated}/{n} images in {out_dir} ({total_failures} failures)")
 
 
 @app.command()
