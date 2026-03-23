@@ -1,18 +1,18 @@
 # /// script
-# requires-python = ">=3.12,<3.13"
+# requires-python = ">=3.12,<4"
 # dependencies = [
-#     "torch",
-#     "torchvision",
+#     "torch>=2.9.1",
+#     "torchvision>=0.25.0,<0.26",
 #     "transformers>=5.2.0",
-#     "datasets>=4.6.0",
-#     "accelerate>=1.12.0",
-#     "wandb",
-#     "pycocotools>=2.0.11",
-#     "torchmetrics>=1.7.0",
-#     "faster-coco-eval>=1.7.0",
+#     "datasets>=4.8.3",
+#     "accelerate>=1.12.0,<2",
+#     "wandb>=0.25.1",
+#     "pycocotools>=2.0.11,<3",
+#     "torchmetrics>=1.8.2,<2",
+#     "faster-coco-eval>=1.7.2,<2",
 #     "huggingface_hub>=1.5.0",
-#     "albumentations>=1.4.20",
-#     "numpy",
+#     "albumentations>=1.4.20,<3",
+#     "numpy>=2.4.2,<3",
 # ]
 # ///
 """Fine-tune RT-DETR r18vd on kaya-go/moku dataset.
