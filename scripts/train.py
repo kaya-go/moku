@@ -248,7 +248,7 @@ class MAPEvalCallback(TrainerCallback):
         print(f"  Epoch {epoch}/{total} — Training")
         print(f"{'=' * 60}")
 
-    def on_evaluate(self, args, state, control, model=None, **kwargs):
+    def on_evaluate(self, args, state, control, model=None, metrics=None, **kwargs):
         epoch = int(state.epoch) if state.epoch else 0
         print(f"\n{'-' * 60}")
         print(f"  Epoch {epoch} — Evaluation")
@@ -352,6 +352,8 @@ class MAPEvalCallback(TrainerCallback):
         }
         if state.log_history:
             state.log_history[-1].update(eval_metrics)
+        if metrics is not None:
+            metrics.update(eval_metrics)
         if self.trainer is not None:
             self.trainer.log(eval_metrics)
 
