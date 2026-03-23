@@ -10,7 +10,6 @@
 #     "pycocotools>=2.0.11",
 #     "torchmetrics>=1.7.0",
 #     "faster-coco-eval>=1.7.0",
-#     "scipy",
 #     "huggingface_hub>=1.5.0",
 #     "albumentations>=1.4.20",
 #     "numpy",
@@ -71,10 +70,160 @@ ID_TO_CATEGORY = {v: k for k, v in CATEGORIES.items()}
 NUM_LABELS = len(CATEGORIES)
 
 
-class MAPEvalCallback(TrainerCallback):
-    """Compute COCO mAP on eval set after each evaluation and log to W&B.
+def _compute_cd_ap_inline(
+    raw: list[dict],
+    distance_threshold: float = 0.02,
+) -> dict[str, float]:
+    """Compute per-class center-distance AP at a single distance threshold.
 
-    When ``save_best_artifact`` is True, saves the best model (by mAP@50:95)
+    Lightweight version inlined in train.py to avoid importing moku.evaluation
+    (which is not available on HF Jobs). Returns {class_name: cdAP_value}.
+    """
+    results: dict[str, float] = {}
+    for cls_id, cls_name in ID_TO_CATEGORY.items():
+        all_detections: list[tuple[float, bool]] = []
+        total_gt = 0
+
+        for img in raw:
+            gt_mask = img["gt_labels"] == cls_id
+            pred_mask = img["pred_labels"] == cls_id
+
+            g_centers = img["gt_centers"][gt_mask] if gt_mask.any() else torch.zeros(0, 2)
+            p_centers = img["pred_centers"][pred_mask] if pred_mask.any() else torch.zeros(0, 2)
+            p_scores = img["pred_scores"][pred_mask] if pred_mask.any() else torch.zeros(0)
+            img_diag = img["img_diag"]
+
+            total_gt += g_centers.shape[0]
+
+            if p_centers.shape[0] == 0:
+                continue
+            if g_centers.shape[0] == 0:
+                for s in p_scores.tolist():
+                    all_detections.append((s, False))
+                continue
+
+            sorted_idx = torch.argsort(p_scores, descending=True)
+            p_centers = p_centers[sorted_idx]
+            p_scores = p_scores[sorted_idx]
+
+            dists = torch.cdist(p_centers.float(), g_centers.float())
+            matched_gt: set[int] = set()
+
+            for pi in range(p_centers.shape[0]):
+                score = float(p_scores[pi])
+                best_gi = -1
+                best_dist = float("inf")
+                for gi in range(g_centers.shape[0]):
+                    if gi in matched_gt:
+                        continue
+                    d = float(dists[pi, gi])
+                    if d < best_dist:
+                        best_dist = d
+                        best_gi = gi
+
+                if best_gi >= 0 and best_dist / img_diag <= distance_threshold:
+                    all_detections.append((score, True))
+                    matched_gt.add(best_gi)
+                else:
+                    all_detections.append((score, False))
+
+        if total_gt == 0:
+            results[cls_name] = 0.0
+            continue
+
+        all_detections.sort(key=lambda x: -x[0])
+        tp_cum = 0
+        fp_cum = 0
+        precisions = np.empty(len(all_detections))
+        recalls = np.empty(len(all_detections))
+
+        for i, (_, is_tp) in enumerate(all_detections):
+            if is_tp:
+                tp_cum += 1
+            else:
+                fp_cum += 1
+            precisions[i] = tp_cum / (tp_cum + fp_cum)
+            recalls[i] = tp_cum / total_gt
+
+        ap = 0.0
+        for t in np.linspace(0, 1, 101):
+            mask = recalls >= t
+            if mask.any():
+                ap += precisions[mask].max()
+        ap /= 101.0
+
+        results[cls_name] = round(float(ap), 4)
+
+    return results
+
+
+def _compute_corner_recall_at_k_inline(
+    raw: list[dict],
+    k: int = 4,
+    dist_threshold: float = 0.02,
+) -> float:
+    """Corner recall using top-k predictions per image (inline version).
+
+    Mirrors inference where only the top-4 corners are kept.
+    Returns mean recall across images with GT corners.
+    """
+    CORNER_CLS_ID = 2
+    recalls: list[float] = []
+
+    for img in raw:
+        gt_mask = img["gt_labels"] == CORNER_CLS_ID
+        pred_mask = img["pred_labels"] == CORNER_CLS_ID
+
+        g_centers = img["gt_centers"][gt_mask] if gt_mask.any() else torch.zeros(0, 2)
+        n_gt = g_centers.shape[0]
+        if n_gt == 0:
+            continue
+
+        p_centers = img["pred_centers"][pred_mask] if pred_mask.any() else torch.zeros(0, 2)
+        p_scores = img["pred_scores"][pred_mask] if pred_mask.any() else torch.zeros(0)
+        img_diag = img["img_diag"]
+
+        if p_centers.shape[0] == 0:
+            recalls.append(0.0)
+            continue
+
+        topk = min(k, p_centers.shape[0])
+        topk_idx = torch.argsort(p_scores, descending=True)[:topk]
+        p_centers = p_centers[topk_idx]
+
+        dists = torch.cdist(p_centers.float(), g_centers.float())
+        matched_gt: set[int] = set()
+        n_matched = 0
+
+        for pi in range(p_centers.shape[0]):
+            best_gi = -1
+            best_dist = float("inf")
+            for gi in range(n_gt):
+                if gi in matched_gt:
+                    continue
+                d = float(dists[pi, gi])
+                if d < best_dist:
+                    best_dist = d
+                    best_gi = gi
+
+            if best_gi >= 0 and best_dist / img_diag <= dist_threshold:
+                matched_gt.add(best_gi)
+                n_matched += 1
+
+        recalls.append(n_matched / n_gt)
+
+    return round(float(np.mean(recalls)) if recalls else 0.0, 4)
+
+
+class MAPEvalCallback(TrainerCallback):
+    """Compute COCO mAP, center-distance AP, and corner recall on eval set.
+
+    All metrics are threshold-free:
+    - mAP@50, mAP@50:95 (COCO standard, all predictions kept)
+    - stone_cdAP@2% (center-distance AP at 2% of image diagonal)
+    - corner_R4 (top-4 corner recall — matches inference behaviour)
+
+    When ``save_best_artifact`` is True, saves the best model (by mAP@50)
     as a W&B artifact whenever a new best is reached.
     """
 
@@ -82,16 +231,14 @@ class MAPEvalCallback(TrainerCallback):
         self,
         eval_dataset,
         image_processor: RTDetrImageProcessor,
-        threshold: float = 0.01,
         save_best_artifact: bool = False,
         eval_batch_size: int = 64,
     ):
         self.eval_dataset = eval_dataset
         self.image_processor = image_processor
-        self.threshold = threshold
         self.save_best_artifact = save_best_artifact
         self.eval_batch_size = eval_batch_size
-        self.best_map: float = 0.0
+        self.best_map_50: float = 0.0
         self.trainer: Trainer | None = None
 
     def on_epoch_begin(self, args, state, control, **kwargs):
@@ -109,7 +256,6 @@ class MAPEvalCallback(TrainerCallback):
 
         if model is None:
             return
-        from scipy.optimize import linear_sum_assignment
         from torchmetrics.detection import MeanAveragePrecision
 
         device = next(model.parameters()).device
@@ -122,10 +268,8 @@ class MAPEvalCallback(TrainerCallback):
             backend="faster_coco_eval",
         )
 
-        # Center-distance accumulators (2% of image diagonal)
-        cd_matches: dict[int, list[tuple[float, float]]] = {i: [] for i in ID_TO_CATEGORY}
-        cd_unmatched_gt: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
-        cd_unmatched_pred: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
+        # Collect raw predictions for cdAP computation
+        raw_predictions: list[dict] = []
 
         dataloader = torch.utils.data.DataLoader(
             self.eval_dataset, batch_size=self.eval_batch_size, collate_fn=collate_fn, shuffle=False
@@ -139,8 +283,9 @@ class MAPEvalCallback(TrainerCallback):
                 outputs = model(pixel_values=pixel_values)
 
             orig_sizes = torch.stack([lab["orig_size"] for lab in labels]).to(device)
+            # threshold=0 keeps all predictions for proper mAP and cdAP computation
             results = self.image_processor.post_process_object_detection(
-                outputs, target_sizes=orig_sizes, threshold=self.threshold
+                outputs, target_sizes=orig_sizes, threshold=0.0
             )
 
             preds = [
@@ -160,80 +305,68 @@ class MAPEvalCallback(TrainerCallback):
 
             metric.update(preds, targets)
 
-            # Center-distance matching per image
-            for pred, tgt, lab in zip(preds, targets, labels):
+            # Collect raw data for cdAP
+            for res, lab in zip(results, labels):
                 orig_h, orig_w = lab["orig_size"]
                 img_diag = float((orig_h**2 + orig_w**2) ** 0.5)
+                pred_boxes = res["boxes"].cpu()
+                pred_scores = res["scores"].cpu()
+                pred_labels = res["labels"].cpu()
+                pred_cx = (pred_boxes[:, 0] + pred_boxes[:, 2]) / 2
+                pred_cy = (pred_boxes[:, 1] + pred_boxes[:, 3]) / 2
+                pred_centers = torch.stack([pred_cx, pred_cy], dim=-1) if pred_boxes.numel() > 0 else torch.zeros(0, 2)
 
-                p_cx = (pred["boxes"][:, 0] + pred["boxes"][:, 2]) / 2
-                p_cy = (pred["boxes"][:, 1] + pred["boxes"][:, 3]) / 2
-                g_cx = (tgt["boxes"][:, 0] + tgt["boxes"][:, 2]) / 2
-                g_cy = (tgt["boxes"][:, 1] + tgt["boxes"][:, 3]) / 2
+                boxes_cxcywh = lab["boxes"]
+                if boxes_cxcywh.numel() > 0:
+                    cx, cy, w, h = boxes_cxcywh.unbind(-1)
+                    gt_centers = torch.stack([cx * orig_w, cy * orig_h], dim=-1)
+                else:
+                    gt_centers = torch.zeros(0, 2)
 
-                for cls_id in ID_TO_CATEGORY:
-                    gm = tgt["labels"] == cls_id
-                    pm = pred["labels"] == cls_id
-                    n_gt = int(gm.sum())
-                    n_pred = int(pm.sum())
-                    if n_gt == 0:
-                        cd_unmatched_pred[cls_id] += n_pred
-                        continue
-                    if n_pred == 0:
-                        cd_unmatched_gt[cls_id] += n_gt
-                        continue
-
-                    gc = torch.stack([g_cx[gm], g_cy[gm]], dim=-1).float()
-                    pc = torch.stack([p_cx[pm], p_cy[pm]], dim=-1).float()
-                    cost = torch.cdist(gc, pc)
-                    gi, pi = linear_sum_assignment(cost.numpy())
-                    for g, p in zip(gi, pi):
-                        cd_matches[cls_id].append((float(cost[g, p]), img_diag))
-                    cd_unmatched_gt[cls_id] += n_gt - len(gi)
-                    cd_unmatched_pred[cls_id] += n_pred - len(pi)
+                raw_predictions.append(
+                    {
+                        "pred_labels": pred_labels,
+                        "pred_scores": pred_scores,
+                        "pred_centers": pred_centers,
+                        "gt_labels": lab["class_labels"].cpu(),
+                        "gt_centers": gt_centers,
+                        "img_diag": img_diag,
+                    }
+                )
 
         result = metric.compute()
 
-        # Compute center-distance metrics at 2% threshold
-        cd_dt = 0.02
-        cd_per_class: dict[str, dict[str, float]] = {}
-        for cls_id, name in ID_TO_CATEGORY.items():
-            matches = cd_matches[cls_id]
-            tp = sum(1 for d, diag in matches if d / diag <= cd_dt)
-            fn = sum(1 for d, diag in matches if d / diag > cd_dt) + cd_unmatched_gt[cls_id]
-            fp = sum(1 for d, diag in matches if d / diag > cd_dt) + cd_unmatched_pred[cls_id]
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-            cd_per_class[name] = {"precision": precision, "recall": recall, "f1": f1}
+        # Compute center-distance AP (threshold-free) at 2% for stones
+        cd_ap = _compute_cd_ap_inline(raw_predictions, distance_threshold=0.02)
+        # Compute top-4 corner recall (matches inference behaviour)
+        corner_r4 = _compute_corner_recall_at_k_inline(raw_predictions, k=4)
 
-        corner_r = cd_per_class["board_corner"]["recall"]
-        stone_f1 = np.mean([cd_per_class[c]["f1"] for c in ("black_stone", "white_stone")])
-
-        # Log mAP + center-distance metrics
-        # Use eval_ prefix so Trainer's WandbCallback maps them to eval/ section
-        map_metrics = {
+        # Log all metrics with eval_ prefix for W&B
+        eval_metrics = {
             "eval_map": float(result.get("map", 0)),
             "eval_map_50": float(result.get("map_50", 0)),
             "eval_map_75": float(result.get("map_75", 0)),
             "eval_mar_400": float(result.get("mar_400", 0)),
-            "eval_corner_R": round(corner_r, 4),
-            "eval_stone_F1": round(float(stone_f1), 4),
+            "eval_corner_R4": corner_r4,
+            "eval_stone_cdAP": round(float(np.mean([cd_ap["black_stone"], cd_ap["white_stone"]])), 4),
         }
         if state.log_history:
-            state.log_history[-1].update(map_metrics)
+            state.log_history[-1].update(eval_metrics)
         if self.trainer is not None:
-            self.trainer.log(map_metrics)
+            self.trainer.log(eval_metrics)
 
         print(
-            f"  mAP@50={map_metrics['eval_map_50']:.4f}  corner_R={map_metrics['eval_corner_R']:.4f}  stone_F1={map_metrics['eval_stone_F1']:.4f}"
-            f"  (mAP@50:95={map_metrics['eval_map']:.4f})"
+            f"  mAP@50={eval_metrics['eval_map_50']:.4f}"
+            f"  corner_R4={eval_metrics['eval_corner_R4']:.4f}"
+            f"  stone_cdAP={eval_metrics['eval_stone_cdAP']:.4f}"
+            f"  (mAP={eval_metrics['eval_map']:.4f})"
         )
 
-        # Save best model as W&B artifact when mAP improves
-        if self.save_best_artifact and map_metrics["eval_map"] > self.best_map:
-            self.best_map = map_metrics["eval_map"]
-            print(f"  ★ New best mAP@50:95={self.best_map:.4f} — saving W&B artifact...")
-            self._save_artifact(model, epoch, map_metrics)
+        # Save best model as W&B artifact when mAP@50 improves
+        if self.save_best_artifact and eval_metrics["eval_map_50"] > self.best_map_50:
+            self.best_map_50 = eval_metrics["eval_map_50"]
+            print(f"  ★ New best mAP@50={self.best_map_50:.4f} — saving W&B artifact...")
+            self._save_artifact(model, epoch, eval_metrics)
 
     def _save_artifact(self, model, epoch: int, map_metrics: dict) -> None:
         """Save model + image processor as a W&B artifact.
@@ -523,6 +656,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable saving best model as W&B artifact (enabled by default when W&B is active)",
     )
+    p.add_argument(
+        "--oversample-real",
+        type=int,
+        default=None,
+        help="Oversample real images by this factor in v3 train set (e.g. 3 = repeat real 3x)",
+    )
     return p.parse_args()
 
 
@@ -603,6 +742,20 @@ def main():
     dataset = load_dataset(hf_dataset, config_name)
     print(dataset)
 
+    # --- Oversample real images in train set ---
+    if args.oversample_real is not None and args.oversample_real > 1:
+        train_ds = dataset["train"]
+        sources = train_ds["source_dataset"]
+        real_indices = [i for i, s in enumerate(sources) if s != "generated"]
+        gen_indices = [i for i, s in enumerate(sources) if s == "generated"]
+        oversampled_indices = gen_indices + real_indices * args.oversample_real
+        dataset["train"] = train_ds.select(oversampled_indices)
+        print(
+            f"\nOversampled real images {args.oversample_real}x: "
+            f"{len(real_indices)} real * {args.oversample_real} + {len(gen_indices)} gen "
+            f"= {len(dataset['train'])} train samples"
+        )
+
     # --- Load model & image processor ---
     print(f"\nLoading model: {model_source} (revision={model_revision})")
     image_processor = RTDetrImageProcessor.from_pretrained(
@@ -661,8 +814,8 @@ def main():
         save_strategy="epoch",
         save_total_limit=3,
         load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        greater_is_better=False,
+        metric_for_best_model="eval_map_50",
+        greater_is_better=True,
         logging_steps=10,
         remove_unused_columns=False,
         dataloader_num_workers=0,

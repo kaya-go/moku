@@ -6,7 +6,7 @@ from moku.viz._constants import (
     CATEGORY_LINEWIDTHS,
     HOSHI_POINTS,
 )
-from moku.viz._eval import plot_model_comparison, plot_threshold_sweep
+from moku.viz._eval import plot_model_comparison
 from moku.viz._prediction import browse_predictions, render_prediction
 from moku.viz._render import render_grid, render_sample_with_grid
 
@@ -17,7 +17,6 @@ __all__ = [
     "browse_dataset",
     "browse_predictions",
     "plot_model_comparison",
-    "plot_threshold_sweep",
     "render_grid",
     "render_prediction",
     "render_sample_with_grid",

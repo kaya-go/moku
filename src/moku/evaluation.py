@@ -195,225 +195,231 @@ def _collect_raw_predictions(
     return raw
 
 
-def _compute_cd_metrics(
+def _compute_cd_ap(
     raw: list[dict],
-    score_threshold: float,
-    distance_thresholds: list[float],
-) -> dict:
-    """Compute center-distance P/R/F1 from raw predictions at a given score threshold."""
-    from scipy.optimize import linear_sum_assignment
-
-    all_matches: dict[int, list[tuple[float, float]]] = {i: [] for i in ID_TO_CATEGORY}
-    unmatched_gt: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
-    unmatched_pred: dict[int, int] = {i: 0 for i in ID_TO_CATEGORY}
-
-    for img in raw:
-        score_mask = img["pred_scores"] >= score_threshold
-        pred_labels = img["pred_labels"][score_mask]
-        pred_centers = img["pred_centers"][score_mask]
-        gt_labels = img["gt_labels"]
-        gt_centers = img["gt_centers"]
-        img_diag = img["img_diag"]
-
-        for cls_id in ID_TO_CATEGORY:
-            gt_mask = gt_labels == cls_id
-            pred_mask = pred_labels == cls_id
-
-            g_centers = gt_centers[gt_mask] if gt_mask.any() else torch.zeros(0, 2)
-            p_centers = pred_centers[pred_mask] if pred_mask.any() else torch.zeros(0, 2)
-
-            n_gt = g_centers.shape[0]
-            n_pred = p_centers.shape[0]
-
-            if n_gt == 0:
-                unmatched_pred[cls_id] += n_pred
-                continue
-            if n_pred == 0:
-                unmatched_gt[cls_id] += n_gt
-                continue
-
-            cost = torch.cdist(g_centers.float(), p_centers.float())
-            gt_idx, pred_idx = linear_sum_assignment(cost.numpy())
-
-            matched = 0
-            for gi, pi in zip(gt_idx, pred_idx):
-                dist = float(cost[gi, pi])
-                all_matches[cls_id].append((dist, img_diag))
-                matched += 1
-
-            unmatched_gt[cls_id] += n_gt - matched
-            unmatched_pred[cls_id] += n_pred - matched
-
-    per_class: dict[str, dict] = {}
-    for cls_id, name in ID_TO_CATEGORY.items():
-        matches = all_matches[cls_id]
-        dists_px = [d for d, _ in matches]
-        per_threshold = {}
-        for dt in distance_thresholds:
-            tp = sum(1 for d, diag in matches if d / diag <= dt)
-            fn = sum(1 for d, diag in matches if d / diag > dt) + unmatched_gt[cls_id]
-            fp = sum(1 for d, diag in matches if d / diag > dt) + unmatched_pred[cls_id]
-            precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-            recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-            per_threshold[f"{dt:.0%}"] = {
-                "precision": round(precision, 4),
-                "recall": round(recall, 4),
-                "f1": round(f1, 4),
-                "tp": tp,
-            }
-        per_class[name] = {
-            "thresholds": per_threshold,
-            "mean_dist_px": round(float(np.mean(dists_px)), 2) if dists_px else None,
-            "median_dist_px": round(float(np.median(dists_px)), 2) if dists_px else None,
-            "n_gt": len(matches) + unmatched_gt[cls_id],
-            "n_pred": len(matches) + unmatched_pred[cls_id],
-            "n_matched": len(matches),
-        }
-
-    return {"per_class": per_class, "distance_thresholds": distance_thresholds}
-
-
-@torch.no_grad()
-def evaluate_center_distance(
-    model: RTDetrForObjectDetection,
-    dataset,
-    image_processor: RTDetrImageProcessor,
-    batch_size: int = 8,
-    threshold: float = 0.3,
     distance_thresholds: list[float] | None = None,
-    device: str | None = None,
 ) -> dict:
-    """Evaluate detections using center-point distance instead of IoU.
+    """Compute center-distance Average Precision (threshold-free).
 
-    For each image and class, predictions are matched to ground truth using
-    greedy nearest-center matching. A match is "correct" if the Euclidean
-    distance between predicted and GT bbox centers is below a threshold
-    (expressed as a fraction of the image diagonal).
+    Like COCO mAP but uses center-distance matching instead of IoU.
+    All predictions are ranked by confidence; the P-R curve is built
+    by sweeping the implicit confidence threshold.
 
     Args:
-        distance_thresholds: Fractions of image diagonal to use as matching
-            thresholds.  Defaults to [0.01, 0.02, 0.05] (1%, 2%, 5%).
+        raw: Output of ``_collect_raw_predictions()``.
+        distance_thresholds: Fractions of image diagonal for matching.
+            Defaults to ``[0.01, 0.02, 0.05]``.
 
-    Returns a dict with:
-        - per_class: dict[class_name] -> {precision, recall, f1, mean_dist, median_dist}
-            at each distance threshold
+    Returns dict with:
+        - per_class: {class_name: {"cdAP@1%": ..., "cdAP@2%": ..., ...}}
+        - macro: {"cdAP@1%": ..., ...} averaged over classes
+        - optimal_thresholds: {class_name: {threshold, f1, precision, recall}}
+          at the middle distance threshold (2% by default)
     """
     if distance_thresholds is None:
         distance_thresholds = [0.01, 0.02, 0.05]
 
-    raw = _collect_raw_predictions(model, dataset, image_processor, batch_size, device)
-    return _compute_cd_metrics(raw, threshold, distance_thresholds)
+    # Primary distance threshold used for optimal-threshold extraction
+    primary_dt = distance_thresholds[len(distance_thresholds) // 2]
+
+    per_class_results: dict[str, dict[str, float]] = {}
+    optimal_thresholds: dict[str, dict] = {}
+
+    for cls_id, cls_name in ID_TO_CATEGORY.items():
+        per_dt: dict[str, float] = {}
+
+        for dt in distance_thresholds:
+            # ── Per-image greedy matching (score-ordered) ─────────────
+            all_detections: list[tuple[float, bool]] = []  # (score, is_tp)
+            total_gt = 0
+
+            for img in raw:
+                gt_mask = img["gt_labels"] == cls_id
+                pred_mask = img["pred_labels"] == cls_id
+
+                g_centers = img["gt_centers"][gt_mask] if gt_mask.any() else torch.zeros(0, 2)
+                p_centers = img["pred_centers"][pred_mask] if pred_mask.any() else torch.zeros(0, 2)
+                p_scores = img["pred_scores"][pred_mask] if pred_mask.any() else torch.zeros(0)
+                img_diag = img["img_diag"]
+
+                n_gt = g_centers.shape[0]
+                total_gt += n_gt
+
+                if p_centers.shape[0] == 0:
+                    continue
+
+                if n_gt == 0:
+                    for s in p_scores.tolist():
+                        all_detections.append((s, False))
+                    continue
+
+                # Sort predictions by score descending for greedy matching
+                sorted_idx = torch.argsort(p_scores, descending=True)
+                p_centers = p_centers[sorted_idx]
+                p_scores = p_scores[sorted_idx]
+
+                dists = torch.cdist(p_centers.float(), g_centers.float())
+                matched_gt: set[int] = set()
+
+                for pi in range(p_centers.shape[0]):
+                    score = float(p_scores[pi])
+                    # Find closest unmatched GT
+                    best_gi = -1
+                    best_dist = float("inf")
+                    for gi in range(n_gt):
+                        if gi in matched_gt:
+                            continue
+                        d = float(dists[pi, gi])
+                        if d < best_dist:
+                            best_dist = d
+                            best_gi = gi
+
+                    if best_gi >= 0 and best_dist / img_diag <= dt:
+                        all_detections.append((score, True))
+                        matched_gt.add(best_gi)
+                    else:
+                        all_detections.append((score, False))
+
+            if total_gt == 0:
+                per_dt[f"cdAP@{dt:.0%}"] = 0.0
+                continue
+
+            # ── Build P-R curve ───────────────────────────────────────
+            all_detections.sort(key=lambda x: -x[0])
+
+            tp_cum = 0
+            fp_cum = 0
+            precisions = np.empty(len(all_detections))
+            recalls = np.empty(len(all_detections))
+            scores_arr = np.empty(len(all_detections))
+
+            for i, (score, is_tp) in enumerate(all_detections):
+                if is_tp:
+                    tp_cum += 1
+                else:
+                    fp_cum += 1
+                precisions[i] = tp_cum / (tp_cum + fp_cum)
+                recalls[i] = tp_cum / total_gt
+                scores_arr[i] = score
+
+            # ── 101-point interpolated AP (COCO style) ────────────────
+            ap = 0.0
+            for t in np.linspace(0, 1, 101):
+                mask = recalls >= t
+                if mask.any():
+                    ap += precisions[mask].max()
+            ap /= 101.0
+
+            per_dt[f"cdAP@{dt:.0%}"] = round(float(ap), 4)
+
+            # ── Optimal F1 threshold at the primary distance threshold ─
+            if dt == primary_dt:
+                denom = precisions + recalls
+                f1_values = np.zeros_like(denom)
+                nonzero = denom > 0
+                f1_values[nonzero] = 2 * precisions[nonzero] * recalls[nonzero] / denom[nonzero]
+                best_idx = int(np.argmax(f1_values))
+                optimal_thresholds[cls_name] = {
+                    "threshold": round(float(scores_arr[best_idx]), 4),
+                    "f1": round(float(f1_values[best_idx]), 4),
+                    "precision": round(float(precisions[best_idx]), 4),
+                    "recall": round(float(recalls[best_idx]), 4),
+                }
+
+        per_class_results[cls_name] = per_dt
+
+    # Macro average
+    all_keys = list(next(iter(per_class_results.values())).keys())
+    macro = {k: round(float(np.mean([per_class_results[c][k] for c in per_class_results])), 4) for k in all_keys}
+
+    return {
+        "per_class": per_class_results,
+        "macro": macro,
+        "optimal_thresholds": optimal_thresholds,
+    }
+
+
+def _compute_corner_recall_at_k(
+    raw: list[dict],
+    k: int = 4,
+    dist_threshold: float = 0.02,
+) -> float:
+    """Corner recall using the top-*k* predictions per image.
+
+    For each image the *k* most confident ``board_corner`` predictions are
+    greedily matched to GT corners (within *dist_threshold* of the image
+    diagonal).  Recall = n_matched / n_gt, averaged across images that have
+    at least one GT corner.
+
+    This mirrors inference behaviour where only the top-4 corners are kept.
+    """
+    CORNER_CLS_ID = 2  # board_corner
+    recalls: list[float] = []
+
+    for img in raw:
+        gt_mask = img["gt_labels"] == CORNER_CLS_ID
+        pred_mask = img["pred_labels"] == CORNER_CLS_ID
+
+        g_centers = img["gt_centers"][gt_mask] if gt_mask.any() else torch.zeros(0, 2)
+        n_gt = g_centers.shape[0]
+        if n_gt == 0:
+            continue  # skip images with no GT corners
+
+        p_centers = img["pred_centers"][pred_mask] if pred_mask.any() else torch.zeros(0, 2)
+        p_scores = img["pred_scores"][pred_mask] if pred_mask.any() else torch.zeros(0)
+        img_diag = img["img_diag"]
+
+        if p_centers.shape[0] == 0:
+            recalls.append(0.0)
+            continue
+
+        # Take top-k by confidence
+        topk = min(k, p_centers.shape[0])
+        topk_idx = torch.argsort(p_scores, descending=True)[:topk]
+        p_centers = p_centers[topk_idx]
+
+        # Greedy matching
+        dists = torch.cdist(p_centers.float(), g_centers.float())
+        matched_gt: set[int] = set()
+        n_matched = 0
+
+        for pi in range(p_centers.shape[0]):
+            best_gi = -1
+            best_dist = float("inf")
+            for gi in range(n_gt):
+                if gi in matched_gt:
+                    continue
+                d = float(dists[pi, gi])
+                if d < best_dist:
+                    best_dist = d
+                    best_gi = gi
+
+            if best_gi >= 0 and best_dist / img_diag <= dist_threshold:
+                matched_gt.add(best_gi)
+                n_matched += 1
+
+        recalls.append(n_matched / n_gt)
+
+    return round(float(np.mean(recalls)) if recalls else 0.0, 4)
 
 
 @torch.no_grad()
-def sweep_confidence_threshold(
+def evaluate_cd_ap(
     model: RTDetrForObjectDetection,
     dataset,
     image_processor: RTDetrImageProcessor,
     batch_size: int = 8,
-    distance_threshold: float = 0.02,
-    score_thresholds: list[float] | None = None,
+    distance_thresholds: list[float] | None = None,
     device: str | None = None,
 ) -> dict:
-    """Sweep confidence thresholds and compute center-distance P/R/F1 and mAP.
+    """Compute center-distance AP and corner recall on a dataset.
 
-    Runs inference once, then evaluates at each score threshold.
-    Returns score_thresholds, per_class P/R/F1, macro P/R/F1, map, map_50.
+    Returns dict with:
+    - per_class cdAP, macro cdAP, and optimal F1 thresholds
+      (see ``_compute_cd_ap`` for details)
+    - ``corner_R4``: top-4 corner recall (matches inference behaviour)
     """
-    from torchmetrics.detection import MeanAveragePrecision
-
-    if score_thresholds is None:
-        score_thresholds = np.arange(0.01, 1.0, 0.01).tolist()
-
     raw = _collect_raw_predictions(model, dataset, image_processor, batch_size, device)
-
-    per_class: dict[str, dict[str, list[float]]] = {
-        name: {"precision": [], "recall": [], "f1": []} for name in ID_TO_CATEGORY.values()
-    }
-    map_values: list[float] = []
-    map_50_values: list[float] = []
-
-    dt_label = f"{distance_threshold:.0%}"
-    for st in score_thresholds:
-        cd = _compute_cd_metrics(raw, st, [distance_threshold])
-        for name in ID_TO_CATEGORY.values():
-            t = cd["per_class"][name]["thresholds"][dt_label]
-            per_class[name]["precision"].append(t["precision"])
-            per_class[name]["recall"].append(t["recall"])
-            per_class[name]["f1"].append(t["f1"])
-
-        metric = MeanAveragePrecision(
-            box_format="xyxy",
-            iou_type="bbox",
-            max_detection_thresholds=[1, 10, 400],
-            backend="faster_coco_eval",
-        )
-        for img in raw:
-            mask = img["pred_scores"] >= st
-            preds = [
-                {
-                    "boxes": img["pred_boxes"][mask],
-                    "scores": img["pred_scores"][mask],
-                    "labels": img["pred_labels"][mask],
-                }
-            ]
-            metric.update(preds, [{"boxes": img["gt_boxes"], "labels": img["gt_labels"]}])
-        result = metric.compute()
-        map_values.append(float(result["map"]))
-        map_50_values.append(float(result["map_50"]))
-
-    # Macro average
-    class_names = list(ID_TO_CATEGORY.values())
-    macro = {
-        "precision": [
-            float(np.mean([per_class[c]["precision"][i] for c in class_names])) for i in range(len(score_thresholds))
-        ],
-        "recall": [
-            float(np.mean([per_class[c]["recall"][i] for c in class_names])) for i in range(len(score_thresholds))
-        ],
-        "f1": [float(np.mean([per_class[c]["f1"][i] for c in class_names])) for i in range(len(score_thresholds))],
-    }
-
-    return {
-        "score_thresholds": score_thresholds,
-        "distance_threshold": distance_threshold,
-        "per_class": per_class,
-        "macro": macro,
-        "map": map_values,
-        "map_50": map_50_values,
-    }
-
-
-def find_optimal_threshold(
-    sweep: dict,
-    metric: str = "f1",
-) -> dict:
-    """Find optimal score thresholds from a confidence sweep.
-
-    Args:
-        sweep: Output of ``sweep_confidence_threshold()``.
-        metric: Which metric to maximize (``"f1"``, ``"precision"``, or ``"recall"``).
-
-    Returns a dict with:
-        - macro: best threshold and metric value for macro-averaged metric
-        - per_class: dict[class_name] -> {threshold, value} for each class
-    """
-    thresholds = sweep["score_thresholds"]
-
-    # Macro
-    values = sweep["macro"][metric]
-    best_idx = int(np.argmax(values))
-    result: dict = {
-        "metric": metric,
-        "macro": {"threshold": round(thresholds[best_idx], 4), "value": round(values[best_idx], 4)},
-        "per_class": {},
-    }
-
-    # Per class
-    for name, data in sweep["per_class"].items():
-        vals = data[metric]
-        ci = int(np.argmax(vals))
-        result["per_class"][name] = {"threshold": round(thresholds[ci], 4), "value": round(vals[ci], 4)}
-
+    result = _compute_cd_ap(raw, distance_thresholds)
+    result["corner_R4"] = _compute_corner_recall_at_k(raw, k=4)
     return result

@@ -1,6 +1,6 @@
 """Analyze W&B training runs for a given round.
 
-Focuses on the 3 key metrics: mAP@50, corner_R, stone_F1.
+Focuses on the 3 key metrics: mAP@50, corner_R4, stone_cdAP.
 
 Usage:
     pixi run python scripts/analyze_runs.py r6
@@ -26,12 +26,12 @@ pd.set_option("display.max_colwidth", 30)
 from moku.runs import fetch_wandb_histories, fetch_wandb_runs
 
 # Key metrics aligned with evaluation pipeline
-KEY_SUMMARY_COLS = ["eval/map_50", "eval/corner_R", "eval/stone_F1"]
+KEY_SUMMARY_COLS = ["eval/map_50", "eval/corner_R4", "eval/stone_cdAP"]
 # History column mapping: Trainer prefixes with train/ during training
 _HIST_COLS = {
     "map_50": ("train/eval/map_50", "eval/map_50"),
-    "corner_R": ("train/eval/corner_R", "eval/corner_R"),
-    "stone_F1": ("train/eval/stone_F1", "eval/stone_F1"),
+    "corner_R4": ("train/eval/corner_R4", "eval/corner_R4"),
+    "stone_cdAP": ("train/eval/stone_cdAP", "eval/stone_cdAP"),
     "map": ("train/eval/map", "eval/map"),
 }
 
@@ -80,7 +80,7 @@ def analyze(group: str, top_n: int | None = None) -> None:
 
     # Resolve metric columns
     cols_resolved = {}
-    for key in ("map_50", "corner_R", "stone_F1", "map"):
+    for key in ("map_50", "corner_R4", "stone_cdAP", "map"):
         col = _resolve_col(history, key)
         if col:
             cols_resolved[key] = col
@@ -107,7 +107,7 @@ def analyze(group: str, top_n: int | None = None) -> None:
         best_epoch = int(row["epoch"])
 
         parts = [f"  {run_name:35s}  best_ep={best_epoch:4d}  mAP@50={row[map50_col]:.4f}"]
-        for key in ("corner_R", "stone_F1"):
+        for key in ("corner_R4", "stone_cdAP"):
             col = cols_resolved.get(key)
             if col and col in grp.columns and pd.notna(row.get(col)):
                 parts.append(f"  {key}={row[col]:.4f}")
@@ -119,7 +119,7 @@ def analyze(group: str, top_n: int | None = None) -> None:
     rows = []
     for run_name, grp in sorted_runs:
         entry: dict = {"run": run_name}
-        for key in ("map_50", "corner_R", "stone_F1"):
+        for key in ("map_50", "corner_R4", "stone_cdAP"):
             col = cols_resolved.get(key)
             if not col or col not in grp.columns:
                 continue
