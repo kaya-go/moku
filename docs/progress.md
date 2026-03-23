@@ -2,7 +2,7 @@
 
 ## Current Status
 
-**Phase**: v3 dataset expansion — scrape + pseudo-label + manual correction
+**Phase**: v3 model published — `model-r10_os3_lr3e-4_cosmin100` selected as moku-v3
 
 ## v1 Results
 
@@ -140,8 +140,8 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 - [x] `20_Analyze_Runs.ipynb`: W&B run analysis (loss/mAP curves, ranking)
 - [x] `30_Publish_Model.ipynb`: select W&B artifact → push to HF Hub
 - [x] Round 5: LR + scheduler sweep (6 runs, 500 epochs, with fixed augmentation)
-- [ ] Round 6: long training sweep (4 runs, 1000 epochs) — in progress
-- [ ] Push best model as `kaya-go/moku-v2` on HF Hub
+- [x] Round 6: long training sweep (4 runs, 1000 epochs)
+- [x] Push best model as `kaya-go/moku-v2` on HF Hub (`model-r6_lr4e-4_cosmin1000`)
 
 ### Round 5 Results (6 runs, 500 epochs)
 
@@ -220,7 +220,13 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 - [x] Round 7: first HP grid search on v3 (4 runs, 500 epochs, bs=32)
 - [x] Round 8: batch_size=128, LR sweep (3 runs, 500 epochs)
 - [x] Evaluate on v3 test set (same as v2 test set for direct comparison)
-- [ ] Round 9: oversample real images + real-only baseline (5 runs)
+- [x] Round 9: oversample real images (9 runs, 500 epochs)
+- [x] Round 10: calibrated scheduler + __getitems__ fix (5 runs, 80-100 epochs)
+- [x] Publish best r10 model as `kaya-go/moku-v3`
+
+### Critical Bug Fixed: `__getitems__` batching (2026-03-23)
+
+PyTorch ≥ 2.4 `DataLoader` calls `dataset.__getitems__([i,j,...])` instead of per-item `__getitem__(i)`. HF `datasets` with `set_transform` passes ALL indices as a batch to the transform function. The `_unbatch_example()` helper in `train.py` took only the FIRST item, discarding the rest → effective batch_size=1 regardless of configured batch_size. **All rounds r5–r9 were affected.** Fix: `dataset[split].__getitems__ = None` after `set_transform()` to force per-item indexing.
 
 ### r7/r8 Results — Generated Data Dilution
 
@@ -233,22 +239,53 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 | r7 (v3) | 306 real + 1000 gen | single-stage, bs=32 | 0.624 | 0.448 | 0.036 |
 | r8 (v3) | 306 real + 1000 gen | single-stage, bs=128 | 0.774 | 0.582 | 0.393 |
 
-### Round 9 Plan (5 runs, 500 epochs) — pending
+### Round 9 Results (9 runs, 500 epochs)
 
-**Goal**: Fix data dilution via real image oversampling. Beat r5/r6 test metrics.
+**Goal**: Fix data dilution via real image oversampling.
 
-| Run | Strategy | oversample | LR | Dataset | BS |
-|-----|----------|-----------|-----|---------|-----|
-| r9_os3_lr2e-4_cosmin500 | Oversample 3× | 3 | 2e-4 | v3 | 128 |
-| r9_os3_lr3e-4_cosmin500 | Oversample 3× | 3 | 3e-4 | v3 | 128 |
-| r9_os5_lr2e-4_cosmin500 | Oversample 5× | 5 | 2e-4 | v3 | 128 |
-| r9_os5_lr3e-4_cosmin500 | Oversample 5× | 5 | 3e-4 | v3 | 128 |
-| r9_real_lr3e-4_cosmin500 | Real-only baseline | 10 (inflate) | 3e-4 | v2 real | 128 |
+**Note**: r9 was affected by the `__getitems__` bug (effective bs=1). Metrics are not reliable.
 
-**Key questions to answer**:
-1. Does oversampling fix the dilution? (os3/os5 vs r7/r8)
-2. Does generated data help at all after rebalancing? (os3/os5 vs real-only)
-3. Can we beat r5/r6 with v3 data + proper balancing?
+Best runs (by peak mAP@50 on val):
+
+| Run | mAP@50 | corner_R4 | stone_cdAP |
+|-----|--------|-----------|------------|
+| r9_os5_lr5e-4_cosmin500 | 0.900 | 0.881 | 0.926 |
+| r9_os5_lr3e-4_cosmin500 | 0.900 | 0.887 | 0.943 |
+| r9_os3_lr3e-4_cosmin500 | 0.859 | 0.826 | 0.946 |
+
+**Finding**: OS5 (5× real oversampling) consistently outperformed OS3 and no-oversample on val metrics. However, all r9 runs crashed (4h timeout with 500 epochs was too long).
+
+### Round 10 Results (5 runs, 80-100 epochs) — SELECTED
+
+**Goal**: Calibrated scheduler (epochs matched to 4h budget), fix `__getitems__` bug.
+
+**Changes from r9**:
+- `__getitems__` bug fixed → real batch_size=16
+- num_epochs calibrated: 80 (OS5), 100 (OS3) to fit 4h budget
+- warmup_ratio=0.05 (was 0.10 in r9 → 60% of training was warmup)
+- LR range: 1e-4–3e-4 (narrowed from r9 sweet spot)
+
+| Run | Best ep | val mAP@50 | val corner_R4 | val stone_cdAP |
+|-----|---------|-----------|---------------|----------------|
+| r10_os3_lr2e-4_cosmin100 | 27 | **0.936** | 0.901 | **0.983** |
+| r10_os5_lr2e-4_cosmin80 | 52 | 0.924 | **0.906** | 0.980 |
+| r10_os5_lr3e-4_cosmin80 | 50 | 0.892 | 0.815 | 0.974 |
+| r10_os3_lr3e-4_cosmin100 | 39 | 0.889 | 0.840 | 0.944 |
+| r10_os5_lr1e-4_cosmin80 | 26 | 0.844 | 0.717 | 0.922 |
+
+**Test set evaluation** (all r10 + best from r5-r9 for comparison):
+
+| Model | test mAP@50 | test corner_R4 | test stone_cdAP |
+|-------|------------|----------------|------------------|
+| **r10_os3_lr3e-4_cosmin100** | **0.862** | **0.825** | 0.919 |
+| r10_os3_lr2e-4_cosmin100 | 0.833 | 0.750 | 0.937 |
+| r10_os5_lr1e-4_cosmin80 | 0.816 | 0.725 | 0.917 |
+| r6_lr4e-4_cosmin1000 (moku-v2) | 0.724 | 0.810 | 0.933 |
+
+**Selected model**: `model-r10_os3_lr3e-4_cosmin100` as **moku-v3**
+- Best test mAP@50 (0.862) and corner_R4 (0.825)
+- Small val→test gap (0.902→0.862) — minimal overfitting
+- +14 points test mAP@50 over moku-v2
 
 ### v3 Milestones
 
@@ -262,6 +299,10 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 | 6 | Build & push v3 dataset (1000 gen images) | done |
 | 7 | Round 7: single-stage HP grid search | done |
 | 8 | Round 8: batch_size=128, LR sweep | done |
+| 9 | Fix `__getitems__` batching bug | done |
+| 10 | Round 9: oversample real images | done |
+| 11 | Round 10: calibrated scheduler post-fix | done |
+| 12 | Select & publish moku-v3 model | done |
 
 ---
 
@@ -323,3 +364,6 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 | 2026-03-22 | No manual annotation for generated images | Gemini preserves stone positions from synthetic input; annotations inherited directly |
 | 2026-03-22 | v3 single-stage training over two-stage | v3 has enough real+generated data; simpler pipeline; no synthetic split to pre-train on |
 | 2026-03-22 | Round 7: broad LR sweep {1e-4, 3e-4, 5e-4} + linear/cosine_with_min_lr, 500ep | First round on v3; need to find right LR regime for single-stage from COCO pretrained |
+| 2026-03-23 | Fixed `__getitems__` batching bug | PyTorch ≥ 2.4 DataLoader + HF datasets set_transform → effective bs=1; all r5-r9 affected |
+| 2026-03-23 | Round 10: calibrated scheduler, 80-100 epochs | Budget-matched epochs, warmup_ratio=0.05, LR 1e-4–3e-4, OS3/OS5 |
+| 2026-03-23 | Selected `model-r10_os3_lr3e-4_cosmin100` as moku-v3 | Best test mAP@50 (0.862), corner_R4 (0.825); +14 pts over moku-v2 |

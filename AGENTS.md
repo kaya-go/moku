@@ -12,7 +12,7 @@ Your goal is to assist in building an object detection model that converts goban
 - **Target**: WebAssembly (WASM) via ONNX Runtime in the Kaya web app.
 - **HF Organization**: `kaya-go` on Hugging Face Hub.
 - **Dataset**: `kaya-go/moku-v1`, `kaya-go/moku-v2`, `kaya-go/moku-v3` on Hugging Face Hub.
-- **Model**: `kaya-go/moku-v2` (fine-tuned RT-DETR) on Hugging Face Hub.
+- **Model**: `kaya-go/moku-v3` (fine-tuned RT-DETR, `model-r10_os3_lr3e-4_cosmin100`) on Hugging Face Hub.
 
 ## Tech Stack & Environment
 
