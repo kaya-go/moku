@@ -73,11 +73,16 @@ def fetch_wandb_histories(
 def list_wandb_model_artifacts(
     project: str = WANDB_PROJECT,
     entity: str = WANDB_ENTITY,
+    skip_orphaned: bool = True,
 ) -> pd.DataFrame:
     """List all model artifacts in a W&B project.
 
     Returns a DataFrame with columns: name, version, aliases, created_at,
     size_mb, and any metadata fields (epoch, eval_map, etc.).
+
+    Args:
+        skip_orphaned: If True (default), skip artifacts whose parent run
+            no longer exists (e.g. deleted runs).
     """
     import wandb
 
@@ -85,6 +90,16 @@ def list_wandb_model_artifacts(
     rows: list[dict] = []
     for collection in api.artifact_type("model", f"{entity}/{project}").collections():
         for artifact in collection.artifacts():
+            try:
+                run = artifact.logged_by()
+                run_name = run.name if run else None
+            except AttributeError:
+                # W&B SDK bug: logged_by() crashes when parent run is deleted
+                run_name = None
+
+            if skip_orphaned and run_name is None:
+                continue
+
             row = {
                 "name": artifact.name,
                 "version": artifact.version,
@@ -93,8 +108,8 @@ def list_wandb_model_artifacts(
                 "size_mb": round(artifact.size / 1e6, 1) if artifact.size else None,
             }
             row.update(artifact.metadata or {})
-            if artifact.logged_by():
-                row["run"] = artifact.logged_by().name
+            if run_name:
+                row["run"] = run_name
             rows.append(row)
 
     return pd.DataFrame(rows)
