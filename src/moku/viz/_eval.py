@@ -74,12 +74,13 @@ def plot_model_comparison(
                 f"{row[metric]:.3f}",
                 ha="center",
                 va="bottom",
-                fontsize=7,
+                fontsize=10,
             )
 
-        ax.set_title(metric, fontsize=10)
+        ax.set_title(metric, fontsize=13, fontweight="bold")
         ax.set_xticks([])
         ax.grid(axis="y", alpha=0.3)
+        ax.tick_params(axis="y", labelsize=10)
 
         # Auto y-range with some headroom for labels
         ymin = min(0, float(np.nanmin(vals)))
@@ -92,14 +93,14 @@ def plot_model_comparison(
         r, c = divmod(idx, ncols)
         axes[r, c].set_visible(False)
 
-    fig.suptitle(title, fontsize=13, fontweight="bold")
+    fig.suptitle(title, fontsize=16, fontweight="bold", y=0.99)
     fig.legend(
         *axes[0, 0].get_legend_handles_labels(),
-        loc="lower center",
-        ncol=min(n_models, 4),
-        fontsize=7,
-        bbox_to_anchor=(0.5, -0.02),
+        loc="upper center",
+        ncol=min(n_models, 3),
+        fontsize=11,
+        bbox_to_anchor=(0.5, 0.94),
     )
-    fig.tight_layout(rect=[0, 0.08, 1, 0.95])
+    fig.tight_layout(rect=[0, 0.02, 1, 0.82])
     plt.show()
     return color_map
