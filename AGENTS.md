@@ -72,7 +72,7 @@ moku/
 ## Pipeline Overview
 
 1. **Dataset** (`01–07` notebooks): Harmonize raw COCO datasets, generate synthetic-conditioned photorealistic images via Gemini style transfer, verify annotations, and build HF datasets (`kaya-go/moku-v1`, `v2`, `v3`).
-2. **Train** (`scripts/train.py`): Fine-tune RT-DETR r18vd via HF Jobs. Two-stage: synthetic pre-train → real fine-tune. Best weights saved as W&B artifacts.
+2. **Train** (`scripts/train.py`): Fine-tune RT-DETR r18vd via HF Jobs. v2: two-stage (synthetic pre-train → real fine-tune). v3: single-stage (COCO pretrained → real+generated). Best weights saved as W&B artifacts.
 3. **Analyze** (`scripts/analyze_runs.py`): Fetch W&B run metrics, compare key metrics (mAP@50, corner_R, stone_F1), plateau analysis.
 4. **Evaluate** (`21_Evaluate.ipynb`): Validate model with mAP and center-distance metrics on test set. Supports loading from HF Hub branches or W&B artifacts.
 5. **Publish** (`30_Publish_Model.ipynb`): Select best W&B artifact and push to HF Hub as official model.

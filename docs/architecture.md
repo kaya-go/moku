@@ -93,9 +93,17 @@ Training follows a **synthetic pre-train → real fine-tune** approach:
 2. **Stage 2 — Real fine-tuning** (~380 real images, 500–1000 epochs, LR=2e-4 to 4e-4):
    The model adapts to the real-world domain: camera noise, natural lighting, real wood textures, etc. Augmentation via albumentations (perspective, rotation, color jitter, blur, etc.). Multiple rounds of LR/scheduler sweeps performed:
    - **Round 5** (6 runs, 500 epochs): best raw mAP@50:95 = 0.6075 (lr=4e-4, linear). Still improving at epoch 500.
-   - **Round 6** (4 runs, 1000 epochs): extended training with `cosine_with_min_lr` scheduler variant. In progress.
+   - **Round 6** (4 runs, 1000 epochs): extended training with `cosine_with_min_lr` scheduler variant.
 
 **Why not mix synthetic + real?** With a ~5:1 synthetic-to-real ratio, naive mixing risks the model over-fitting to synthetic appearance. Two-stage training cleanly separates domain learning from domain adaptation, which consistently outperforms mixing in sim-to-real transfer literature.
+
+### v3 Single-Stage Training Strategy
+
+v3 switches to **single-stage training** from COCO pretrained weights directly on the combined dataset (real + Gemini-generated).
+
+**Why single-stage?** v3 dropped the procedural synthetic dataset. The generated images (via Gemini style transfer from synthetic inputs) are photorealistic and share the same domain as real images, so a two-stage sim-to-real approach is no longer needed. The model trains directly on ~1306 train images (306 real + 1000 generated).
+
+**Rounds 7–8**: LR sweeps on v3, batch_size exploration (32 vs 128), 500 epochs.
 
 ## ONNX Export
 

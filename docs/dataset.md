@@ -164,8 +164,15 @@ v2 model reaches mAP@50:95 ~0.60 (best R5/R6 runs). HP tuning is saturated on 38
 | Source | Type | Approx. size | Notes |
 |--------|------|-------------|-------|
 | v2 real (all splits) | Real images | ~382 | Unchanged from v2 |
-| v2 synthetic (all splits) | Synthetic | 2500/500/500 | Unchanged from v2 |
-| Gemini-generated | Generated, human-corrected | 112+ (of 500) | `data/annotate_generated/`, annotation in progress |
+| Gemini-generated | Style-transferred, inherited annotations | 1000 | `data/annotate_generated/`, no manual correction needed |
+
+**Note**: v3 dropped the v2 synthetic dataset entirely. Synthetic images are only used as input for Gemini style transfer.
+
+### v3 Generation Pipeline
+
+1. **Synthetic generation** (`src/moku/synthetic.py`): Generate procedural goban images with perfect COCO annotations (stone positions, board corners)
+2. **Gemini style transfer** (`src/moku/generate.py`): Transform synthetic images into photorealistic photographs using Gemini. The prompt instructs Gemini to preserve the exact board position, camera angle, and stone placements.
+3. **Annotation inheritance**: Since Gemini preserves stone positions and camera viewpoint, the synthetic COCO annotations are reused directly as ground truth. No pseudo-labeling or manual correction is needed.
 
 ### v3 Split Strategy
 
@@ -173,16 +180,18 @@ v2 model reaches mAP@50:95 ~0.60 (best R5/R6 runs). HP tuning is saturated on 38
 
 - **test**: v2 real test (unchanged)
 - **validation**: v2 real validation (unchanged)
-- **train**: v2 real train + all annotated generated images
+- **train**: v2 real train (~306) + all 1000 generated images = ~1306 total
+- **test**: v2 real test (unchanged, ~38 images)
+- **validation**: v2 real validation (unchanged, ~38 images)
 
-Generated images are added to train only. As more images are annotated, the dataset is re-pushed.
+Generated images are added to train only.
 
 ### v3 Build Process
 
-1. Load `kaya-go/moku-v2` (real + synthetic configs) from HF Hub
-2. Load annotated generated images from `data/annotate_generated/corrected.json` via `load_annotated_generated()`
+1. Load `kaya-go/moku-v2` real config from HF Hub
+2. Load generated images from `data/annotate_generated/` via `load_annotated_generated()` (annotations inherited from synthetic inputs)
 3. Concatenate generated images into v2 real train split
-4. Keep val/test/synthetic unchanged
-5. Push as `kaya-go/moku-v3` on HF Hub (configs: `real`, `synthetic`)
+4. Keep val/test unchanged
+5. Push as `kaya-go/moku-v3` on HF Hub (single config, no sub-configs)
 
 Built via `notebooks/07_Build_Dataset_v3.ipynb`.

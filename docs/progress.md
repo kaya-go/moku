@@ -178,35 +178,36 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 
 ---
 
-## v3 — Data-Centric Expansion via Gemini Generation
+## v3 — Data-Centric Expansion via Gemini Style Transfer
 
-**Goal**: Expand real training data via Gemini-generated goban photos + pseudo-labeling + manual correction. HP tuning is saturated on 382 images — more diverse data is the main lever.
+**Goal**: Expand real training data via Gemini-generated photorealistic goban images. HP tuning is saturated on 382 images — more diverse data is the main lever.
 
-**Approach (actual)**: Instead of scraping, use Gemini to generate photorealistic goban images (`src/moku/generate.py`), then pseudo-label with v2 model and manually correct annotations.
+**Approach**: Use the synthetic generator (`src/moku/synthetic.py`) to produce images with perfect annotations, then use Gemini (`src/moku/generate.py`) for **style transfer** — transforming synthetic images into photorealistic photographs while preserving the exact board position. Annotations are **inherited directly** from the synthetic input because Gemini preserves stone positions and camera angle. No pseudo-labeling or manual correction is needed.
 
-### Phase 1 — Image Generation (`src/moku/generate.py`, `notebooks/05_Generate_Images.ipynb`)
+### Phase 1 — Synthetic → Photorealistic Generation
 
-- [x] Create `src/moku/generate.py`: Gemini image generation with randomized prompts (angle, lighting, surface, game state)
-- [x] Generate 500 images at 1024×1024 → `data/generated/`
-- [x] Copy images to annotator workspace → `data/annotate_generated/images/`
+- [x] Create `src/moku/generate.py`: Gemini style transfer (synthetic → photorealistic)
+- [x] `src/moku/synthetic.py` generates input images with perfect COCO annotations
+- [x] Gemini transforms synthetic images into photorealistic photos while preserving stone positions
+- [x] Generate 1000 images at 1024×1024 → `data/annotate_generated/images/`
+- [x] Annotations inherited from synthetic inputs (stored as per-image JSON files)
 
-### Phase 2 — Pseudo-Label + Manual Correction (`notebooks/06_Annotate_Generated.ipynb`)
+### Phase 2 — Verification (`notebooks/06_Annotate_Generated.ipynb`)
 
-- [x] Pseudo-label all 500 images with v2 model (low threshold=0.01)
-- [x] Generate `data/annotate_generated/images.json` for annotator
-- [x] Manual correction via `tools/annotator/` → `data/annotate_generated/corrected.json`
-- [ ] Annotate remaining images (112/500 done so far)
+- [x] Visual spot-checks confirm Gemini preserves stone positions accurately
+- [x] Generate `data/annotate_generated/images.json` for metadata
+- [x] No manual correction needed — synthetic annotations are reliable
 
 ### Phase 3 — Dataset v3 Build (`notebooks/07_Build_Dataset_v3.ipynb`)
 
 - [x] `load_annotated_generated()` utility in `src/moku/dataset.py`
 - [x] `07_Build_Dataset_v3.ipynb` notebook created
-- [ ] Build and push initial v3 with 112 generated images (run notebook)
-- [ ] Re-push with more images as annotation progresses
+- [x] Build and push v3 with 1000 generated images
 
 **v3 data composition**:
-- **train**: v2 real train (~382) + generated annotated — val/test unchanged from v2
-- No synthetic split — only real + generated photorealistic images
+- **train**: v2 real train (~306) + 1000 generated images = ~1306 total
+- **val/test**: unchanged from v2 (real images only, ~38 each)
+- No synthetic split — v3 dropped procedural synthetic data entirely
 - **HF Hub**: `kaya-go/moku-v3` (single config, no sub-configs)
 
 ### Phase 4 — v3 Training
@@ -216,20 +217,51 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 - v3 dataset has enough real+generated data to train directly
 
 - [x] Update `scripts/train.py` with `--dataset` and `--dataset-config` args for v3 support
-- [ ] Round 7: first HP grid search on v3 (4 runs, 500 epochs)
-- [ ] Evaluate on v3 test set (same as v2 test set for direct comparison)
+- [x] Round 7: first HP grid search on v3 (4 runs, 500 epochs, bs=32)
+- [x] Round 8: batch_size=128, LR sweep (3 runs, 500 epochs)
+- [x] Evaluate on v3 test set (same as v2 test set for direct comparison)
+- [ ] Round 9: oversample real images + real-only baseline (5 runs)
+
+### r7/r8 Results — Generated Data Dilution
+
+**Problem identified**: v3 single-stage underperforms v2 two-stage (r5/r6). The 1000 generated images (~77% of train) dilute the real image signal. Val/test sets are 100% real, so the model overfits to the generated domain.
+
+| Round | Dataset | Mode | Best val mAP@50 | Best test mAP@50 | Test corner_R4 |
+|-------|---------|------|-----------------|-----------------|----------------|
+| r5 (v2) | 306 real | two-stage | 0.921 | 0.785 | 0.679 |
+| r6 (v2) | 306 real | two-stage | 0.776 | 0.807 | 0.893 |
+| r7 (v3) | 306 real + 1000 gen | single-stage, bs=32 | 0.624 | 0.448 | 0.036 |
+| r8 (v3) | 306 real + 1000 gen | single-stage, bs=128 | 0.774 | 0.582 | 0.393 |
+
+### Round 9 Plan (5 runs, 500 epochs) — pending
+
+**Goal**: Fix data dilution via real image oversampling. Beat r5/r6 test metrics.
+
+| Run | Strategy | oversample | LR | Dataset | BS |
+|-----|----------|-----------|-----|---------|-----|
+| r9_os3_lr2e-4_cosmin500 | Oversample 3× | 3 | 2e-4 | v3 | 128 |
+| r9_os3_lr3e-4_cosmin500 | Oversample 3× | 3 | 3e-4 | v3 | 128 |
+| r9_os5_lr2e-4_cosmin500 | Oversample 5× | 5 | 2e-4 | v3 | 128 |
+| r9_os5_lr3e-4_cosmin500 | Oversample 5× | 5 | 3e-4 | v3 | 128 |
+| r9_real_lr3e-4_cosmin500 | Real-only baseline | 10 (inflate) | 3e-4 | v2 real | 128 |
+
+**Key questions to answer**:
+1. Does oversampling fix the dilution? (os3/os5 vs r7/r8)
+2. Does generated data help at all after rebalancing? (os3/os5 vs real-only)
+3. Can we beat r5/r6 with v3 data + proper balancing?
 
 ### v3 Milestones
 
 | # | Milestone | Status |
 |---|-----------|--------|
-| 1 | Gemini image generation (500 images) | done |
-| 2 | Pseudo-labeling with v2 model | done |
-| 3 | Manual correction (112/500 annotated) | in progress |
+| 1 | Synthetic image generation (1000 inputs) | done |
+| 2 | Gemini style transfer (1000 images) | done |
+| 3 | Annotation verification (inherited from synthetic) | done |
 | 4 | `load_annotated_generated()` in dataset.py | done |
 | 5 | `07_Build_Dataset_v3.ipynb` notebook | done |
-| 6 | Build & push v3 dataset | done |
-| 7 | Round 7: single-stage HP grid search | in progress |
+| 6 | Build & push v3 dataset (1000 gen images) | done |
+| 7 | Round 7: single-stage HP grid search | done |
+| 8 | Round 8: batch_size=128, LR sweep | done |
 
 ---
 
@@ -284,10 +316,10 @@ Mixing synthetic + real data risks over-representing the synthetic domain (4:1 r
 | 2026-03-16 | Include lr=3e-4 in R6 grid | EMA-smoothed analysis showed r5_lr3e-4_cos had higher mean mAP than lr=4e-4 despite lower raw max |
 | 2026-03-16 | Keep batch_size=32 (not 64) | 382 train images / 64 = 6 steps/epoch — too few for stable gradient estimation |
 | 2026-03-16 | Create `scripts/analyze_runs.py` | Reusable W&B analysis with EMA smoothing and plateau detection; replaces ad-hoc notebook/scripts |
-| 2026-03-22 | v3 data-centric strategy: Gemini generation + pseudo-label + correct | HP tuning saturated on 382 images; more diverse data is the main lever for mAP gains |
-| 2026-03-22 | Gemini image generation over web scraping | Better quality control, no licensing issues, photorealistic goban images on demand |
+| 2026-03-22 | v3 data-centric strategy: Gemini style transfer from synthetic inputs | HP tuning saturated on 382 images; more diverse data is the main lever for mAP gains |
+| 2026-03-22 | Gemini style transfer over web scraping | Better quality control, no licensing issues, annotations inherited from synthetic inputs (no labeling needed) |
 | 2026-03-22 | v3 test/val identical to v2 | Direct metric comparison between v2 and v3; new images go to train only |
-| 2026-03-22 | Keep synthetic pre-train for v3 | Two-stage training proved its value (corner AP +50%); reuse v2 stage 1 or re-train |
-| 2026-03-22 | Consider single-stage with oversampling as alternative | Avoids catastrophic forgetting; compare A/B with two-stage |
+| 2026-03-22 | Drop synthetic dataset in v3 | v3 uses Gemini-generated photorealistic images instead; synthetic data only used as input for style transfer |
+| 2026-03-22 | No manual annotation for generated images | Gemini preserves stone positions from synthetic input; annotations inherited directly |
 | 2026-03-22 | v3 single-stage training over two-stage | v3 has enough real+generated data; simpler pipeline; no synthetic split to pre-train on |
 | 2026-03-22 | Round 7: broad LR sweep {1e-4, 3e-4, 5e-4} + linear/cosine_with_min_lr, 500ep | First round on v3; need to find right LR regime for single-stage from COCO pretrained |
