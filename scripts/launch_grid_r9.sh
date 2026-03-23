@@ -1,29 +1,22 @@
 #!/usr/bin/env bash
-# Round 9 hyperparameter search (5 runs).
+# Round 9 hyperparameter search (9 runs).
 #
-# Diagnosis from r7/r8: v3 single-stage training underperforms v2 two-stage (r5/r6).
-# Root cause: 1000 generated images (~77% of train) dilute the real image signal.
-# Val/test sets are 100% real images, so the model overfits to the generated domain.
+# First round with the __getitems__ fix: DataLoader now processes real batches
+# instead of silently dropping all but the first image per batch.
+# ALL previous rounds (r5-r8) trained with effective batch_size=1.
 #
-# Strategy: **oversample real images** to rebalance real:generated ratio.
-# With heavy augmentation, repeated real images look different each time.
+# Strategy: single-stage v3 (382 real + 1000 generated) with real batching.
+# Two axes explored:
+#   A) LR × scheduler (baseline, no oversampling)
+#   B) Oversampling real images to rebalance real:generated ratio
 #
-# Data composition at each oversample level (v3 = 306 real + 1000 gen):
-#   os=1 (current):  306 real + 1000 gen = 1306 total  (ratio 0.31:1)
-#   os=3:            918 real + 1000 gen = 1918 total  (ratio 0.92:1)
-#   os=5:           1530 real + 1000 gen = 2530 total  (ratio 1.53:1)
+# Batch size: 16 (verified on A10G 24GB with actual batching).
+# LR: re-exploration needed since effective batch size changed from 1 → 16.
 #
-# Run 5 is a **real-only baseline** on v2 real (no generated data at all).
-# This tells us whether generated data helps or hurts after rebalancing.
-# Uses --oversample-real 10 to inflate 306 → 3060 images for bs=128 viability.
-#
-# All runs:
-#   - bs=128 (proven faster convergence in r8)
-#   - cosine_with_min_lr (min_lr=5e-5, proven in r6)
-#   - 500 epochs, a10g-large, 4h timeout
-#
-# Targets to beat (best from r5/r6 on test set):
-#   mAP@50 = 0.807  |  corner_R4 = 0.893  |  stone_cdAP@2% = 0.911
+# Data composition at each oversample level (v3 = 382 real + 1000 gen):
+#   os=1 (default):  382 real + 1000 gen = 1382 total  (ratio 0.38:1)
+#   os=3:           1146 real + 1000 gen = 2146 total  (ratio 1.15:1)
+#   os=5:           1910 real + 1000 gen = 2910 total  (ratio 1.91:1)
 #
 # Usage:
 #   bash scripts/launch_grid_r9.sh
@@ -50,45 +43,63 @@ launch() {
 		--stage 1 \
 		--round "$ROUND" \
 		--run-name "$run_name" \
-		--batch-size 128 \
-		--lr-scheduler cosine_with_min_lr \
-		--lr-scheduler-kwargs '{"min_lr": 5e-5}' \
+		--batch-size 16 \
 		--num-epochs 500 \
 		"$@"
 	sleep "$SLEEP"
 }
 
-echo "=== Round 9: Oversample real + real-only baseline (5 runs) ==="
+echo "=== Round 9: Single-stage v3, bs=16 with __getitems__ fix (9 runs) ==="
 
-# ── Oversample 3× (near-balanced real:gen ≈ 1:1) ────────────────────────
+# ── A) LR × scheduler baseline (no oversampling) ────────────────────────
 
-launch "r9_os3_lr2e-4_cosmin500" \
-	--lr 2e-4 \
-	--oversample-real 3
+launch "r9_lr1e-4_linear500" \
+	--lr 1e-4 \
+	--lr-scheduler linear
+
+launch "r9_lr3e-4_linear500" \
+	--lr 3e-4 \
+	--lr-scheduler linear
+
+launch "r9_lr5e-4_linear500" \
+	--lr 5e-4 \
+	--lr-scheduler linear
+
+launch "r9_lr1e-4_cosmin500" \
+	--lr 1e-4 \
+	--lr-scheduler cosine_with_min_lr \
+	--lr-scheduler-kwargs '{"min_lr": 1e-5}'
+
+launch "r9_lr3e-4_cosmin500" \
+	--lr 3e-4 \
+	--lr-scheduler cosine_with_min_lr \
+	--lr-scheduler-kwargs '{"min_lr": 3e-5}'
+
+# ── B) Oversampling real images (best LR from above range) ──────────────
 
 launch "r9_os3_lr3e-4_cosmin500" \
 	--lr 3e-4 \
+	--lr-scheduler cosine_with_min_lr \
+	--lr-scheduler-kwargs '{"min_lr": 3e-5}' \
 	--oversample-real 3
-
-# ── Oversample 5× (real-dominant ≈ 1.5:1) ───────────────────────────────
-
-launch "r9_os5_lr2e-4_cosmin500" \
-	--lr 2e-4 \
-	--oversample-real 5
 
 launch "r9_os5_lr3e-4_cosmin500" \
 	--lr 3e-4 \
+	--lr-scheduler cosine_with_min_lr \
+	--lr-scheduler-kwargs '{"min_lr": 3e-5}' \
 	--oversample-real 5
 
-# ── Real-only baseline (no generated data) ───────────────────────────────
-# Uses v2 "real" config (306 train images, same val/test as v3).
-# oversample-real=10 inflates to 3060 images for bs=128 viability (~24 steps/ep).
+launch "r9_os3_lr5e-4_cosmin500" \
+	--lr 5e-4 \
+	--lr-scheduler cosine_with_min_lr \
+	--lr-scheduler-kwargs '{"min_lr": 5e-5}' \
+	--oversample-real 3
 
-launch "r9_real_lr3e-4_cosmin500" \
-	--lr 3e-4 \
-	--dataset kaya-go/moku-v2 \
-	--dataset-config real \
-	--oversample-real 10
+launch "r9_os5_lr5e-4_cosmin500" \
+	--lr 5e-4 \
+	--lr-scheduler cosine_with_min_lr \
+	--lr-scheduler-kwargs '{"min_lr": 5e-5}' \
+	--oversample-real 5
 
 echo ""
 echo "All r9 runs launched. Monitor at https://wandb.ai/hadim/moku"

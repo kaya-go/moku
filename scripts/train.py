@@ -238,7 +238,7 @@ class MAPEvalCallback(TrainerCallback):
         self.image_processor = image_processor
         self.save_best_artifact = save_best_artifact
         self.eval_batch_size = eval_batch_size
-        self.best_map_50: float = 0.0
+        self.best_map_50: float = -1.0
         self.trainer: Trainer | None = None
 
     def on_epoch_begin(self, args, state, control, **kwargs):
@@ -609,6 +609,13 @@ def parse_args() -> argparse.Namespace:
         "--stage", type=int, choices=[1, 2], default=1, help="Training stage: 1=synthetic/single, 2=real (fine-tune)"
     )
     p.add_argument("--resume-from", type=str, default=None, help="HF model ID or local path to resume from (stage 2)")
+    p.add_argument("--resume-revision", type=str, default=None, help="HF Hub revision for --resume-from model")
+    p.add_argument(
+        "--resume-from-wandb",
+        type=str,
+        default=None,
+        help="W&B artifact path to resume from, e.g. 'model-r10_s1:latest' (stage 2)",
+    )
     p.add_argument("--resume", action="store_true", help="Resume interrupted training from last checkpoint")
     p.add_argument("--run-name", default="baseline", help="Name of the training run")
     p.add_argument("--dataset", type=str, default=None, help="HF dataset ID (default: HF_DATASET constant)")
@@ -620,7 +627,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--num-epochs", type=int, default=50)
     p.add_argument("--batch-size", type=int, default=4)
-    p.add_argument("--eval-batch-size", type=int, default=64)
+    p.add_argument("--eval-batch-size", type=int, default=8)
+    p.add_argument("--grad-accum", type=int, default=1, help="Gradient accumulation steps")
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--weight-decay", type=float, default=1e-4)
     p.add_argument("--warmup-ratio", type=float, default=0.1)
@@ -659,12 +667,43 @@ def parse_args() -> argparse.Namespace:
         help="Disable saving best model as W&B artifact (enabled by default when W&B is active)",
     )
     p.add_argument(
+        "--filter-source",
+        type=str,
+        default=None,
+        choices=["real", "generated"],
+        help="Filter train set to only include images from this source (v3 only)",
+    )
+    p.add_argument(
         "--oversample-real",
         type=int,
-        default=None,
-        help="Oversample real images by this factor in v3 train set (e.g. 3 = repeat real 3x)",
+        default=1,
+        help="Repeat real images N times in train set to rebalance real:generated ratio",
     )
     return p.parse_args()
+
+
+def _download_wandb_artifact(artifact_path: str) -> str:
+    """Download a W&B model artifact and return its local directory path.
+
+    Args:
+        artifact_path: Artifact name with optional version/alias, e.g.
+            ``"model-r10_s1:latest"`` or full path
+            ``"hadim/moku/model-r10_s1:v5"``.
+    """
+    import wandb
+
+    api = wandb.Api()
+    entity = os.environ.get("WANDB_ENTITY", "hadim")
+    project = os.environ.get("WANDB_PROJECT", "moku")
+
+    if artifact_path.count("/") < 2:
+        artifact_path = f"{entity}/{project}/{artifact_path}"
+
+    print(f"Downloading W&B artifact: {artifact_path}")
+    artifact = api.artifact(artifact_path, type="model")
+    artifact_dir = artifact.download()
+    print(f"  → {artifact_dir}")
+    return artifact_dir
 
 
 def _load_dotenv():
@@ -719,9 +758,12 @@ def main():
             config_name = "real"
         else:
             config_name = None
-        if args.resume_from:
-            model_source = args.resume_from
+        if args.resume_from_wandb:
+            model_source = _download_wandb_artifact(args.resume_from_wandb)
             model_revision = None
+        elif args.resume_from:
+            model_source = args.resume_from
+            model_revision = args.resume_revision
         else:
             model_source = HF_MODEL
             model_revision = STAGE1_REVISION
@@ -744,18 +786,33 @@ def main():
     dataset = load_dataset(hf_dataset, config_name)
     print(dataset)
 
-    # --- Oversample real images in train set ---
-    if args.oversample_real is not None and args.oversample_real > 1:
+    # --- Filter train set by source ---
+    if args.filter_source:
         train_ds = dataset["train"]
         sources = train_ds["source_dataset"]
-        real_indices = [i for i, s in enumerate(sources) if s != "generated"]
-        gen_indices = [i for i, s in enumerate(sources) if s == "generated"]
-        oversampled_indices = gen_indices + real_indices * args.oversample_real
-        dataset["train"] = train_ds.select(oversampled_indices)
+        if args.filter_source == "generated":
+            indices = [i for i, s in enumerate(sources) if s == "generated"]
+        else:
+            indices = [i for i, s in enumerate(sources) if s != "generated"]
+        dataset["train"] = train_ds.select(indices)
+        print(f"\nFiltered train set to source={args.filter_source}: {len(dataset['train'])} samples")
+
+    # --- Oversample real images ---
+    if args.oversample_real > 1:
+        from datasets import concatenate_datasets
+
+        train_ds = dataset["train"]
+        sources = train_ds["source_dataset"]
+        real_idx = [i for i, s in enumerate(sources) if s != "generated"]
+        gen_idx = [i for i, s in enumerate(sources) if s == "generated"]
+        real_ds = train_ds.select(real_idx)
+        gen_ds = train_ds.select(gen_idx) if gen_idx else None
+        parts = [real_ds] * args.oversample_real
+        if gen_ds is not None:
+            parts.append(gen_ds)
+        dataset["train"] = concatenate_datasets(parts)
         print(
-            f"\nOversampled real images {args.oversample_real}x: "
-            f"{len(real_indices)} real * {args.oversample_real} + {len(gen_indices)} gen "
-            f"= {len(dataset['train'])} train samples"
+            f"\nOversampled real {args.oversample_real}×: {len(real_idx)} real × {args.oversample_real} + {len(gen_idx)} gen = {len(dataset['train'])} samples"
         )
 
     # --- Load model & image processor ---
@@ -792,6 +849,15 @@ def main():
     dataset["train"].set_transform(make_train_transform(image_processor))
     dataset["validation"].set_transform(make_eval_transform(image_processor))
 
+    # Disable __getitems__ to prevent DataLoader from batching the transform
+    # call.  With __getitems__ enabled (PyTorch ≥ 2.4), the DataLoader calls
+    # dataset.__getitems__([i, j, ...]) which passes a *batch* of examples to
+    # the transform — and _unbatch_example keeps only the first element,
+    # silently discarding the rest.  Setting __getitems__ to None makes
+    # DataLoader fall back to per-item __getitem__, which is correct.
+    for split in ("train", "validation"):
+        dataset[split].__getitems__ = None  # type: ignore[assignment]
+
     # --- Training arguments ---
     report_to = "none" if args.no_wandb else "wandb"
 
@@ -807,6 +873,7 @@ def main():
         num_train_epochs=num_epochs,
         per_device_train_batch_size=args.batch_size,
         per_device_eval_batch_size=args.eval_batch_size,
+        gradient_accumulation_steps=args.grad_accum,
         learning_rate=lr,
         weight_decay=args.weight_decay,
         lr_scheduler_type=args.lr_scheduler,

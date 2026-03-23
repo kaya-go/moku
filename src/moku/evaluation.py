@@ -50,6 +50,11 @@ def evaluate_map(
         backend="faster_coco_eval",
     )
 
+    # Disable __getitems__ to prevent DataLoader from batching the transform
+    # call (PyTorch >= 2.4).  See train.py for the full explanation.
+    if hasattr(dataset, "__getitems__"):
+        dataset.__getitems__ = None  # type: ignore[assignment]
+
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 
     for batch in dataloader:
@@ -143,6 +148,12 @@ def _collect_raw_predictions(
     model.eval()
 
     raw: list[dict] = []
+
+    # Disable __getitems__ to prevent DataLoader from batching the transform
+    # call (PyTorch >= 2.4).  See train.py for the full explanation.
+    if hasattr(dataset, "__getitems__"):
+        dataset.__getitems__ = None  # type: ignore[assignment]
+
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False)
 
     for batch in dataloader:
