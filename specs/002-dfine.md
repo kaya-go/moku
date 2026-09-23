@@ -41,4 +41,8 @@ at half the size and latency.
 
 ## Results
 
-_Pending._
+Inconclusive (2026-09-23). The first runs had a broken EMA (D-FINE ties its class/box heads;
+fixed in `ModelEMA`). The fixed run (`c0-dfine-s-s0-v3`, with the generated images) learned
+corners only from epoch ~17 and was stopped at epoch 23 (errors 73, corner failures 79%) to save
+budget. DEIMv2-S (`c2-deimv2-s-s0`) had excellent calibration (TP ≈ 0.7) but no corners by
+epoch 17. Both should be retried on the clean data (spec 004) if the budget allows.

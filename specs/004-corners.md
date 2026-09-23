@@ -48,12 +48,24 @@ only filters false corners outside the board, and it changes Kaya's 3-class cont
 ## Tasks
 
 - [x] Diagnostic of corner candidates (table above).
-- [ ] `refine_corners`: least-squares homography from snapped stones; applied when it lowers the
-  snap residual and moves a corner by less than half a cell. Rebuild moku-v4.
-- [ ] B2: RT-DETR, real photos (v3 real + Roboflow), corrected corners.
+- [x] `refine_corners` (`moku.annotations`): least-squares homography from the snapped stones,
+  applied when it lowers the snap residual and moves no corner by more than 1 cell. Applied to
+  every real image of moku-v4 (all splits; generated images left as is): 591 corrected
+  (go_game_v10 138, go_chess 181, my_go_detection 272), median shift 0.25 cell, p90 0.41, max 0.99.
+  **The v2/v3 baselines of spec 003 predate this correction and must be recomputed.**
+- [ ] B2 (launched 2026-09-23, `b2-rtdetr-real-rf-s0`): RT-DETR, real photos only (v3 real +
+  Roboflow train), corrected corners. Compare with B1 (`b1-rtdetr-real-s0`, no Roboflow, old
+  labels) and B0 (`b0-rtdetr-s0/1`, with generated images).
 - [ ] Post-processing selection/refinement prototype.
 - [ ] Corner head.
 
 ## Results
 
-_Pending._
+_Pending._ Resume point (2026-09-23, paused for budget):
+
+1. `moku runs list` for B0, B1, B2 (all finished by then); `moku eval` their `best/` and `last/`
+   with v2/v3 on moku-v4 validation/test (new labels) and Gomrade; `moku calibrate` the winner.
+2. If real-only + Roboflow + corrected corners wins (expected from B1): train the corner head
+   (lever 4) and prototype the post-processing selection (lever 2) on that data.
+3. DEIMv2-S (best calibration, TP ≈ 0.7) and D-FINE-S deserve a rerun on the clean data only if
+   the budget allows (~$2.5 per A100 run; ~$30 of HF credit left, hard cap).

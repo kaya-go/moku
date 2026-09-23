@@ -63,4 +63,17 @@ The reference RT-DETR/D-FINE recipe alone (same model, same data) fixes calibrat
 
 ## Results
 
-_Pending._
+Partial (2026-09-23), validation v4, EMA weights:
+
+- Throughput: ~60 img/s (RT-DETR) and ~52 img/s (D-FINE-S) on an A100, CPU-bound (GPU busy 43%
+  of the step; ~8.7k small kernels per step). The transformers matcher was quadratic in the batch
+  size; replaced by a per-image matcher (`moku.training.matcher`).
+- B0 (RT-DETR, v3 train incl. generated images): corners learned from epoch ~10 but validation
+  got worse after epoch ~25 (errors 61 → 70+, corner failures 70% → 80–90%) while the training
+  loss kept falling. Best val (old perfect definition) 20–23% at epochs 17–25.
+- The recipe did **not** fix calibration: true-positive scores stay ~0.05–0.08, even on training
+  images (max score per image ~0.3). Likely one-to-one matching ambiguity on dense identical
+  stones. DEIMv2's MAL loss gives TP ≈ 0.7 (run C2, stopped for slow corners).
+- B1 (RT-DETR, real photos only): better corners than B0 (60–64% failures vs 70–90%).
+- A per-model stone threshold baked into the ONNX as a logit offset (`moku calibrate`) gives
+  +3 to +8 points of perfect boards on v2/v3 for free.
