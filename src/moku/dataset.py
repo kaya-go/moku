@@ -1,7 +1,8 @@
-"""Dataset loading and harmonization utilities for moku.
+"""Dataset building for moku.
 
-Loads raw COCO-format datasets exported from Roboflow and harmonizes them
-into a single HuggingFace dataset with unified categories.
+- v1/v2 real data: raw Roboflow COCO exports harmonized into the 3 moku
+  categories and re-split by base image (raw exports are not in the repo).
+- v3: v2 real images plus Gemini-generated images (train only), see :func:`build_v3`.
 """
 
 from __future__ import annotations
@@ -12,7 +13,6 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 from datasets import Dataset, DatasetDict
 from datasets import Image as HFImage
 from scipy.spatial import ConvexHull
@@ -338,13 +338,33 @@ def build_dataset(
     return DatasetDict(dataset_dict)
 
 
+def build_v3(generated_dir: Path = Path("data/annotate_generated"), base: str = "kaya-go/moku-v2") -> DatasetDict:
+    """Build moku-v3: v2 real images + generated images in train; val/test unchanged.
+
+    Keeping v2's validation and test splits makes metrics comparable across versions.
+    """
+    from datasets import concatenate_datasets, load_dataset
+
+    from moku.annotations import load_annotated_generated
+
+    real = load_dataset(base, name="real")
+    generated = load_annotated_generated(generated_dir / "images", generated_dir / "images.json")
+    return DatasetDict(
+        {
+            "train": concatenate_datasets([real["train"], generated]),
+            "validation": real["validation"],
+            "test": real["test"],
+        }
+    )
+
+
 def compute_split_stats(ds: Dataset) -> dict:
     """Compute annotation statistics for a dataset split."""
     all_categories: list[int] = []
     sources: list[str] = []
     total_objects = 0
 
-    for sample in ds:
+    for sample in ds.select_columns(["objects", "source_dataset"]):
         all_categories.extend(sample["objects"]["category"])
         sources.append(sample["source_dataset"])
         total_objects += len(sample["objects"]["bbox"])
@@ -356,257 +376,3 @@ def compute_split_stats(ds: Dataset) -> dict:
         "category_counts": Counter(all_categories),
         "source_counts": Counter(sources),
     }
-
-
-# ---------------------------------------------------------------------------
-# Corner annotation audit & correction utilities
-# ---------------------------------------------------------------------------
-
-
-def _audit_split(ds: Dataset, split_name: str, expected_count: int) -> list[dict]:
-    """Run corner audit on a single dataset split. Returns rows for flagged images."""
-    corner_cat = CATEGORIES["board_corner"]
-    rows = []
-
-    for sample in ds:
-        objects = sample["objects"]
-        corner_boxes = [(bbox, cat) for bbox, cat in zip(objects["bbox"], objects["category"]) if cat == corner_cat]
-        n_corners = len(corner_boxes)
-        issues: list[str] = []
-
-        if n_corners != expected_count:
-            issues.append(f"wrong_count ({n_corners} vs {expected_count})")
-
-        if n_corners >= 2:
-            w, h = sample["width"], sample["height"]
-            cx_img, cy_img = w / 2, h / 2
-
-            # Check corners are in distinct quadrants
-            quadrants: set[str] = set()
-            for (x, y, bw, bh), _ in corner_boxes:
-                bcx = x + bw / 2
-                bcy = y + bh / 2
-                q = ("T" if bcy < cy_img else "B") + ("L" if bcx < cx_img else "R")
-                quadrants.add(q)
-
-            if len(quadrants) < n_corners:
-                issues.append(f"duplicate_quadrant ({sorted(quadrants)})")
-
-            if n_corners == expected_count and len(quadrants) < expected_count:
-                issues.append("not_in_4_quadrants")
-
-            # Check bbox size relative to image area
-            img_area = w * h
-            for (x, y, bw, bh), _ in corner_boxes:
-                rel = (bw * bh) / img_area
-                if rel < 1e-5:
-                    issues.append(f"too_small ({bw * bh:.1f} px\u00b2)")
-                    break
-                if rel > 0.01:
-                    issues.append(f"too_large ({bw * bh:.1f} px\u00b2)")
-                    break
-
-        if issues:
-            rows.append(
-                {
-                    "split": split_name,
-                    "image_id": sample.get("image_id", -1),
-                    "source_dataset": sample.get("source_dataset", "unknown"),
-                    "n_corners": n_corners,
-                    "issues": ", ".join(issues),
-                }
-            )
-
-    return rows
-
-
-def audit_corners(dataset_or_dict, expected_count: int = 4) -> pd.DataFrame:
-    """Audit board_corner annotations for quality issues.
-
-    For each image, checks:
-    - Correct number of corners (default: 4)
-    - Corners appear in 4 distinct quadrants of the image
-    - Corner bbox sizes are reasonable relative to image area
-
-    Args:
-        dataset_or_dict: A ``Dataset`` or ``DatasetDict``. If ``DatasetDict``,
-            all splits are audited and a ``split`` column is added.
-        expected_count: Expected number of board_corner annotations per image.
-
-    Returns:
-        DataFrame with one row per flagged image: split, image_id,
-        source_dataset, n_corners, issues.
-    """
-    if hasattr(dataset_or_dict, "items"):
-        rows: list[dict] = []
-        for split_name, ds in dataset_or_dict.items():
-            rows.extend(_audit_split(ds, split_name, expected_count))
-        return pd.DataFrame(rows)
-
-    return pd.DataFrame(_audit_split(dataset_or_dict, "dataset", expected_count))
-
-
-def apply_corner_corrections(dataset: DatasetDict, corrections: dict) -> DatasetDict:
-    """Apply human-corrected board_corner annotations to a DatasetDict.
-
-    Corrected boxes (from the annotator) replace the existing
-    board_corner annotations for each image. Non-corner annotations are
-    kept unchanged.
-
-    Args:
-        dataset: The original ``DatasetDict``.
-        corrections: Dict mapping filename (``"{split}_{source}_{imageId}.jpg"``)
-            to ``{"boxes": [{"id", "x", "y", "w", "h", "category"}, ...]}``.
-
-    Returns:
-        A new ``DatasetDict`` with corrected corner annotations.
-    """
-    corner_cat = CATEGORIES["board_corner"]
-
-    # Build lookup: (split, source, image_id) → correction entry
-    corr_lookup: dict[tuple[str, str, str], dict] = {}
-    for fname, val in corrections.items():
-        # Parse filename: "{split}_{source}_{imageId}.jpg"
-        stem = fname.rsplit(".", 1)[0]  # drop .jpg
-        parts = stem.split("_", 1)  # split on first _ to get split name
-        if len(parts) < 2:
-            continue
-        # Split name may itself contain underscores (e.g. no, but be safe)
-        # Format is: {split}_{source}_{imageId}
-        # Split is always train/validation/test
-        for known_split in ("validation", "train", "test"):
-            if stem.startswith(known_split + "_"):
-                rest = stem[len(known_split) + 1 :]
-                # rest = "{source}_{imageId}" — imageId is the last segment
-                last_underscore = rest.rfind("_")
-                if last_underscore >= 0:
-                    source = rest[:last_underscore]
-                    image_id = rest[last_underscore + 1 :]
-                    corr_lookup[(known_split, source, image_id)] = val
-                break
-
-    def _make_apply(split_name: str):
-        def _apply(sample: dict, idx: int) -> dict:
-            source = sample.get("source_dataset", "unknown")
-            image_id = str(sample["image_id"])
-            corr = corr_lookup.get((split_name, source, image_id))
-            if corr is None:
-                return sample
-
-            corr_boxes = [b for b in corr.get("boxes", []) if b.get("category") == corner_cat]
-
-            objects = sample["objects"]
-            non_corner_idx = [i for i, c in enumerate(objects["category"]) if c != corner_cat]
-
-            new_ids = [objects["id"][i] for i in non_corner_idx]
-            new_bboxes = [objects["bbox"][i] for i in non_corner_idx]
-            new_cats = [objects["category"][i] for i in non_corner_idx]
-            new_areas = [objects["area"][i] for i in non_corner_idx]
-            new_iscrowd = [objects["iscrowd"][i] for i in non_corner_idx]
-
-            for box in corr_boxes:
-                new_ids.append(int(box["id"]))
-                new_bboxes.append([box["x"], box["y"], box["w"], box["h"]])
-                new_cats.append(corner_cat)
-                new_areas.append(box["w"] * box["h"])
-                new_iscrowd.append(0)
-
-            return {
-                **sample,
-                "objects": {
-                    "id": new_ids,
-                    "bbox": new_bboxes,
-                    "category": new_cats,
-                    "area": new_areas,
-                    "iscrowd": new_iscrowd,
-                },
-            }
-
-        return _apply
-
-    return DatasetDict({split: ds.map(_make_apply(split), with_indices=True) for split, ds in dataset.items()})
-
-
-def load_annotated_generated(
-    images_dir: Path,
-    images_json_path: Path,
-    corrections_path: Path | None = None,
-) -> Dataset:
-    """Load annotations for generated (e.g. Gemini) images.
-
-    When ``corrections_path`` is provided and exists, only images present in
-    that file are included (with human-corrected boxes).  Otherwise, all
-    per-image JSON files in ``images_dir`` are loaded directly.
-
-    Args:
-        images_dir: Directory containing the image files and per-image JSONs.
-        images_json_path: Path to ``images.json`` with image metadata.
-        corrections_path: Optional path to ``corrected.json`` from the
-            annotator.  If ``None`` or the file does not exist, original
-            annotations from the per-image JSONs are used instead.
-
-    Returns:
-        An HF ``Dataset`` with the same schema as real/synthetic datasets.
-    """
-    with open(images_json_path) as f:
-        images_meta = json.load(f)
-
-    # Build width/height lookup from images.json
-    meta_lookup = {img["filename"]: img for img in images_meta["images"]}
-
-    use_corrections = corrections_path is not None and Path(corrections_path).exists()
-
-    if use_corrections:
-        with open(corrections_path) as f:
-            corrections = json.load(f)
-        entries = sorted(corrections.items())
-    else:
-        # Load per-image JSON files from images_dir
-        entries = []
-        for json_path in sorted(images_dir.glob("*.json")):
-            with open(json_path) as f:
-                data = json.load(f)
-            filename = data["image"]["filename"]
-            entries.append((filename, data))
-
-    rows = []
-    ann_id = 0
-    for i, (filename, corr) in enumerate(entries):
-        if isinstance(corr, dict) and corr.get("excluded"):
-            continue
-
-        meta = meta_lookup.get(filename, {})
-        width = meta.get("width", 1024)
-        height = meta.get("height", 1024)
-        image_path = str(images_dir / filename)
-
-        boxes = corr.get("boxes", [])
-        objects = {
-            "id": [],
-            "bbox": [],
-            "category": [],
-            "area": [],
-            "iscrowd": [],
-        }
-        for box in boxes:
-            objects["id"].append(ann_id)
-            objects["bbox"].append([box["x"], box["y"], box["w"], box["h"]])
-            objects["category"].append(box["category"])
-            objects["area"].append(box["w"] * box["h"])
-            objects["iscrowd"].append(0)
-            ann_id += 1
-
-        rows.append(
-            {
-                "image": image_path,
-                "image_id": i,
-                "width": width,
-                "height": height,
-                "source_dataset": "generated",
-                "objects": objects,
-            }
-        )
-
-    ds = Dataset.from_list(rows)
-    ds = ds.cast_column("image", HFImage())
-    return ds
