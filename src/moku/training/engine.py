@@ -77,6 +77,7 @@ class TrainConfig:
     limit_eval: int | None = None
     corner_head: bool = False  # train the dense corner head (moku.corner_head) with the detector
     corner_head_weight: float = 1.0
+    corner_head_hidden: int = 64
     freeze_detector: bool = False  # train the corner head alone on a frozen detector (e.g. --model kaya-go/moku-v2)
     select_on: str = "kaya"  # corner method whose validation metrics pick the best checkpoint (kaya, head, ...)
     profile_steps: int = 0  # > 0: profile that many steps after a warm-up, print the top ops and stop
@@ -305,7 +306,7 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
     from datasets import load_dataset
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
 
-    from moku.corner_head import attach_corner_head, encoder_features
+    from moku.corner_head import attach_corner_head, encoder_features, load_corner_head
     from moku.training.matcher import install as install_blockwise_matcher
 
     install_blockwise_matcher()
@@ -340,8 +341,8 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
     )
     if cfg.freeze_detector:
         model.requires_grad_(False)
-    if cfg.corner_head:
-        attach_corner_head(model)
+    if cfg.corner_head and not load_corner_head(model, cfg.base_model):  # resume a trained head if the base has one
+        attach_corner_head(model, cfg.corner_head_hidden)
     model = model.to(device)
     ema = ModelEMA(model, cfg.ema_decay, cfg.ema_tau)
     optimizer = torch.optim.AdamW(

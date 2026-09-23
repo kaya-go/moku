@@ -92,8 +92,8 @@ class CornerHead(nn.Module):
         return torch.stack([x, y, scores], dim=-1)
 
 
-def attach_corner_head(model: nn.Module) -> CornerHead:
-    model.corner_head = CornerHead(getattr(model.config, "encoder_hidden_dim", 256))
+def attach_corner_head(model: nn.Module, hidden: int = 64) -> CornerHead:
+    model.corner_head = CornerHead(getattr(model.config, "encoder_hidden_dim", 256), hidden)
     return model.corner_head
 
 
@@ -118,7 +118,7 @@ def load_corner_head(model: nn.Module, repo: str, revision: str | None = None) -
         state = {k[len(PREFIX) :]: f.get_tensor(k) for k in f.keys() if k.startswith(PREFIX)}
     if not state:
         return False
-    head = attach_corner_head(model)
+    head = attach_corner_head(model, hidden=state["net.0.weight"].shape[0])
     head.load_state_dict(state)
     head.to(next(model.parameters()).device)
     return True
