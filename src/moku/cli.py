@@ -90,7 +90,7 @@ def eval_cmd(
     """
     from datasets import load_dataset
 
-    from moku.evaluation import evaluate, paired_difference, threshold_sweep
+    from moku.evaluation import evaluate, is_perfect, paired_difference, threshold_sweep
     from moku.inference import load_detector
 
     ds = load_dataset(dataset)
@@ -116,12 +116,13 @@ def eval_cmd(
                 }
             )
         b0 = results[0].board
-        console.print(_table(rows, f"{split}: {b0['boards']} boards from ~{b0['photos']} distinct photos (90% CI)"))
+        title = f"{split}: {b0['boards']} boards ({b0['empty']} empty) from ~{b0['photos']} photos/games (90% CI)"
+        console.print(_table(rows, title))
         if len(results) > 1:
-            base = results[0].boards.assign(perfect=results[0].boards.errors == 0)
+            base = results[0].boards.assign(perfect=is_perfect(results[0].boards))
             deltas = []
             for r in results[1:]:
-                other = r.boards.assign(perfect=r.boards.errors == 0)
+                other = r.boards.assign(perfect=is_perfect(r.boards))
                 perfect = paired_difference(base, other, "perfect")
                 errors = paired_difference(base, other, "errors")
                 deltas.append(

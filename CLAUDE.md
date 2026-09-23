@@ -86,7 +86,8 @@ Empty intersections are never detected — they are inferred from geometry.
 
 Detection metrics (mAP@50, stone cdAP, corner R@4) are diagnostics. Models are compared on
 **board metrics** from `moku eval`: the Kaya pipeline reconstructs the position, which is compared
-with the position read from the annotations (perfect boards, errors per board, corner failures),
+with the position read from the annotations (perfect boards = exact position and located board,
+errors per board, corner failures),
 with bootstrap CIs over photos. Validation/test are ~50 images from ~30 distinct photos: report
 intervals, never a single number.
 

@@ -13,7 +13,9 @@ Board metrics — what the user actually gets. Kaya's pipeline (see
 :mod:`moku.board`) reconstructs the position, which is compared intersection by
 intersection with the position read from the ground-truth annotations:
 
-- ``perfect``: share of boards with zero wrong intersections;
+- ``perfect``: share of boards read exactly — zero wrong intersections **and** the board located
+  (no corner more than half a cell off). Without the second condition an empty board would count
+  as perfect for a model that detects nothing, whatever its corners;
 - ``errors``: mean number of wrong intersections per board;
 - ``corner_fail``: share of boards with a corner more than half a grid cell off.
 
@@ -277,15 +279,24 @@ def bootstrap_mean_ci(
     return float(np.quantile(means, alpha)), float(np.quantile(means, 1 - alpha))
 
 
+CORNER_FAIL_CELLS = 0.5
+
+
+def is_perfect(table: pd.DataFrame) -> pd.Series:
+    """Exact position and located board (see the module docstring)."""
+    return (table["errors"] == 0) & (table["corner_err_cells"] <= CORNER_FAIL_CELLS)
+
+
 def board_summary(table: pd.DataFrame, with_ci: bool = True) -> dict[str, float]:
-    perfect = (table["errors"] == 0).to_numpy(dtype=float)
+    perfect = is_perfect(table).to_numpy(dtype=float)
     summary = {
         "boards": len(table),
         "photos": int(table["cluster"].nunique()),
+        "empty": int((table["n_truth_stones"] == 0).sum()),
         "perfect": float(perfect.mean()),
         "errors": float(table["errors"].mean()),
         "le2_errors": float((table["errors"] <= 2).mean()),
-        "corner_fail": float((table["corner_err_cells"] > 0.5).mean()),
+        "corner_fail": float((table["corner_err_cells"] > CORNER_FAIL_CELLS).mean()),
     }
     if with_ci:
         summary["perfect_ci"] = bootstrap_mean_ci(perfect, table["cluster"].to_numpy())
