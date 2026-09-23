@@ -65,6 +65,7 @@ class TrainConfig:
     workers: int | None = None  # default: available CPUs minus 2
     amp: bool = True  # bf16 autocast on CUDA
     eval_every: int = 1
+    eval_raw: bool = False  # also evaluate the raw (non-EMA) weights, to debug the EMA
     log_every: int = 25
     max_hours: float | None = None  # stop cleanly (and save) past this budget
     limit_train: int | None = None  # smoke tests: truncate the training set
@@ -430,6 +431,13 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
             t_eval = time.time()
             metrics = evaluate_model(ema.module, processor, val, device)
             epoch_record.update({f"val/{k}": v for k, v in metrics.items()}, eval_s=time.time() - t_eval)
+            if cfg.eval_raw:
+                raw = evaluate_model(model, processor, val, device)
+                epoch_record.update({f"val_raw/{k}": v for k, v in raw.items()})
+                print(
+                    f"   raw weights: perfect {raw['perfect']:.0%}, errors {raw['errors']:.1f}, "
+                    f"corner fail {raw['corner_fail']:.0%}, TP {raw['stone_tp_score']:.2f} / {raw['corner_tp_score']:.2f}"
+                )
             print(
                 f"== epoch {epoch}: val perfect {metrics['perfect']:.0%}, errors {metrics['errors']:.1f}, "
                 f"corner fail {metrics['corner_fail']:.0%}, mAP@50 {metrics['mAP@50']:.3f}, "
