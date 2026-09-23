@@ -19,7 +19,9 @@ intersection with the position read from the ground-truth annotations:
 
 Test sets are small (tens of images, some being augmented copies of the same
 photo), so board metrics come with bootstrap confidence intervals resampled
-over photo clusters rather than images.
+over photo clusters rather than images. A cluster is the position (up to
+symmetry), or the ``source_dataset`` itself when it names a group such as
+``gomrade/<game>`` (frames of one game are not independent).
 """
 
 from __future__ import annotations
@@ -248,7 +250,7 @@ def board_table(
                 "index": i,
                 "source": target.source,
                 "board_size": truth.board_size,
-                "cluster": _photo_cluster(truth.grid, i),
+                "cluster": target.source if "/" in target.source else _photo_cluster(truth.grid, i),
                 "corners_found": result.n_corner_candidates,
                 "corner_err_cells": _corner_error_cells(result.corners, truth.corners, truth.board_size),
                 **compare_boards(result.grid, truth.grid),

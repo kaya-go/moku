@@ -291,6 +291,39 @@ def dataset_build_v3(
         console.print(f"Pushed https://huggingface.co/datasets/{push}")
 
 
+@dataset_app.command("build-v4")
+def dataset_build_v4(
+    roboflow: Path = typer.Option(..., help="Roboflow `my-go-detection` COCO export (unzipped)."),
+    push: str | None = typer.Option(None, help="Push to this Hub dataset repo (private), e.g. kaya-go/moku-v4."),
+) -> None:
+    """Build moku-v4: moku-v3 + Roboflow photos split by photo (see moku.external.build_v4)."""
+    from moku.external import build_v4
+
+    ds = build_v4(roboflow)
+    console.print(ds)
+    if push:
+        ds.push_to_hub(push, private=True)
+        console.print(f"Pushed https://huggingface.co/datasets/{push}")
+
+
+@dataset_app.command("build-gomrade")
+def dataset_build_gomrade(
+    root: Path = typer.Option(..., help="Unzipped Kaggle Gomrade archive (contains dataset/, dataset2/)."),
+    frames_per_game: int = typer.Option(3),
+    push: str | None = typer.Option(None, help="Push to this Hub dataset repo (always private: CC BY-NC-ND)."),
+) -> None:
+    """Build the Gomrade evaluation set (test split only; never used for training)."""
+    from datasets import DatasetDict
+
+    from moku.external import load_gomrade
+
+    ds = DatasetDict({"test": load_gomrade(root, frames_per_game)})
+    console.print(ds)
+    if push:
+        ds.push_to_hub(push, private=True)
+        console.print(f"Pushed https://huggingface.co/datasets/{push}")
+
+
 @annotate_app.command("prepare")
 def annotate_prepare(
     dataset: str = typer.Option(DEFAULT_DATASET),

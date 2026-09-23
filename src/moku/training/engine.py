@@ -44,7 +44,8 @@ MODELS = {
 class TrainConfig:
     run_name: str
     model: str = "rtdetr-r18"  # a key of MODELS or a Hub repo id
-    dataset: str = "kaya-go/moku-v3"
+    dataset: str = "kaya-go/moku-v4"
+    train_exclude: str | None = None  # comma-separated source datasets left out of training
     output_dir: str = "runs"
     epochs: int = 72
     no_aug_epochs: int = 8
@@ -283,7 +284,8 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
         torch.backends.cudnn.allow_tf32 = True
 
     ds = load_dataset(cfg.dataset)
-    indices = train_indices(ds["train"], cfg.oversample_real, cfg.source)
+    exclude = tuple(cfg.train_exclude.split(",")) if cfg.train_exclude else ()
+    indices = train_indices(ds["train"], cfg.oversample_real, cfg.source, exclude)
     if cfg.limit_train:
         indices = random.Random(cfg.seed).sample(indices, min(cfg.limit_train, len(indices)))
     val = ds["validation"]

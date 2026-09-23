@@ -65,3 +65,4 @@ def test_train_indices_oversample_real():
     split = {"source_dataset": ["go_chess", "generated", "go_game_v10", "generated"]}
     assert sorted(train_indices(split, 3)) == [0, 0, 0, 1, 2, 2, 2, 3]
     assert train_indices(split, 1, "generated") == [1, 3]
+    assert train_indices(split, 2, exclude=("go_chess",)) == [2, 2, 1, 3]

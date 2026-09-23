@@ -2,6 +2,7 @@
 # requires-python = ">=3.12,<3.15"
 # dependencies = [
 #     "torch>=2.13.0,<3",
+#     "torchvision>=0.28.0,<0.29",
 #     "transformers>=5.16.1,<6",
 #     "datasets>=5.0.1,<6",
 #     "huggingface_hub>=1.32.0,<2",

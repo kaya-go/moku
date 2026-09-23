@@ -105,14 +105,16 @@ def collate(batch: list) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]]]:
     return torch.stack(images), list(labels)
 
 
-def train_indices(split, oversample_real: int = 1, source: str | None = None) -> list[int]:
+def train_indices(
+    split, oversample_real: int = 1, source: str | None = None, exclude: tuple[str, ...] = ()
+) -> list[int]:
     """Row indices of the training set: real photos repeated ``oversample_real`` times, generated once.
 
-    ``source`` keeps only ``"real"`` or ``"generated"`` images.
+    ``source`` keeps only ``"real"`` or ``"generated"`` images; ``exclude`` drops whole source datasets.
     """
     sources = split["source_dataset"]
-    real = [i for i, s in enumerate(sources) if s != "generated"]
-    generated = [i for i, s in enumerate(sources) if s == "generated"]
+    real = [i for i, s in enumerate(sources) if s != "generated" and s not in exclude]
+    generated = [i for i, s in enumerate(sources) if s == "generated" and s not in exclude]
     if source == "real":
         generated = []
     elif source == "generated":
