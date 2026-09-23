@@ -22,6 +22,8 @@ import numpy as np
 import torch
 from PIL import Image
 
+from moku.corner_head import corner_points, load_corner_head
+
 INPUT_SIZE = 640
 
 
@@ -33,6 +35,7 @@ class RawPrediction:
     boxes: np.ndarray  # (Q, 4) normalized cxcywh
     width: int  # original image size, in pixels
     height: int
+    corner_points: np.ndarray | None = None  # (K, 3) x, y in [0, 1] and score, from the corner head
 
 
 class Detector(Protocol):
@@ -89,6 +92,7 @@ class TorchDetector:
         repo, _, revision = source.partition("@")
         processor = AutoImageProcessor.from_pretrained(repo, revision=revision or None)
         model = AutoModelForObjectDetection.from_pretrained(repo, revision=revision or None)
+        load_corner_head(model, repo, revision or None)
         return cls(model, processor, name=name or source, device=device)
 
     @torch.no_grad()
@@ -98,7 +102,9 @@ class TorchDetector:
         out = self.model(pixel_values=pixel_values)
         logits = out.logits.float().cpu().numpy()
         boxes = out.pred_boxes.float().cpu().numpy()
-        return [RawPrediction(lg, bx, im.width, im.height) for lg, bx, im in zip(logits, boxes, images)]
+        points = corner_points(self.model, out)
+        points = [None] * len(images) if points is None else points.float().cpu().numpy()
+        return [RawPrediction(lg, bx, im.width, im.height, pt) for lg, bx, pt, im in zip(logits, boxes, points, images)]
 
 
 class OnnxDetector:
@@ -115,9 +121,11 @@ class OnnxDetector:
 
     def predict(self, images: list[Image.Image]) -> list[RawPrediction]:
         preds = []
+        names = [o.name for o in self.session.get_outputs()]
         for im in images:
-            logits, boxes = self.session.run(["logits", "pred_boxes"], {"pixel_values": kaya_preprocess(im)})
-            preds.append(RawPrediction(logits[0], boxes[0], im.width, im.height))
+            out = dict(zip(names, self.session.run(names, {"pixel_values": kaya_preprocess(im)})))
+            points = out["corner_points"][0] if "corner_points" in out else None
+            preds.append(RawPrediction(out["logits"][0], out["pred_boxes"][0], im.width, im.height, points))
         return preds
 
 

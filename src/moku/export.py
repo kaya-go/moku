@@ -19,7 +19,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from moku.corner_head import corner_points, load_corner_head
+
 OPSET = 18
+OUTPUTS = ("logits", "pred_boxes", "corner_points")  # corner_points only with the corner head
 
 
 class _OnnxWrapper(torch.nn.Module):
@@ -42,7 +45,10 @@ class _OnnxWrapper(torch.nn.Module):
         if self.normalize:
             pixel_values = (pixel_values - self.mean) / self.std
         out = self.model(pixel_values=pixel_values)
-        return out.logits + self.logit_offset, out.pred_boxes
+        points = corner_points(self.model, out)
+        if points is None:
+            return out.logits + self.logit_offset, out.pred_boxes
+        return out.logits + self.logit_offset, out.pred_boxes, points
 
 
 def load_for_export(source: str, logit_offset: float = 0.0) -> tuple[torch.nn.Module, int]:
@@ -52,6 +58,7 @@ def load_for_export(source: str, logit_offset: float = 0.0) -> tuple[torch.nn.Mo
     repo, _, revision = source.partition("@")
     processor = AutoImageProcessor.from_pretrained(repo, revision=revision or None)
     model = AutoModelForObjectDetection.from_pretrained(repo, revision=revision or None, attn_implementation="eager")
+    load_corner_head(model, repo, revision or None)
     mean, std = (
         (processor.image_mean, processor.image_std) if getattr(processor, "do_normalize", False) else (None, None)
     )
@@ -69,8 +76,8 @@ def export_onnx(source: str, output: Path, opset: int = OPSET, logit_offset: flo
         str(output),
         opset_version=opset,
         input_names=["pixel_values"],
-        output_names=["logits", "pred_boxes"],
-        dynamic_axes={name: {0: "batch_size"} for name in ("pixel_values", "logits", "pred_boxes")},
+        output_names=list(OUTPUTS[: 3 if hasattr(wrapper.model, "corner_head") else 2]),
+        dynamic_axes={name: {0: "batch_size"} for name in ("pixel_values", *OUTPUTS)},
         do_constant_folding=True,
         dynamo=False,
     )
@@ -90,14 +97,17 @@ def verify_onnx(
     wrapper, size = load_for_export(source, logit_offset)
     x = torch.rand(1, 3, size, size, generator=torch.Generator().manual_seed(seed))
     with torch.no_grad():
-        pt_logits, pt_boxes = (t[0].numpy() for t in wrapper(x))
+        pt = [t[0].numpy() for t in wrapper(x)]
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    ort_logits, ort_boxes = (t[0] for t in session.run(["logits", "pred_boxes"], {"pixel_values": x.numpy()}))
+    ort_out = [t[0] for t in session.run(OUTPUTS[: len(pt)], {"pixel_values": x.numpy()})]
+    (pt_logits, pt_boxes), (ort_logits, ort_boxes) = pt[:2], ort_out[:2]
     match = np.abs(pt_boxes[:, None, :] - ort_boxes[None, :, :]).sum(-1).argmin(axis=1)
     diffs = {
         "logits_max_abs_diff": float(np.abs(pt_logits - ort_logits[match]).max()),
         "boxes_max_abs_diff": float(np.abs(pt_boxes - ort_boxes[match]).max()),
     }
+    if len(pt) == 3:
+        diffs["corner_points_max_abs_diff"] = float(np.abs(pt[2] - ort_out[2]).max())
     if max(diffs.values()) > atol:
         raise AssertionError(f"ONNX outputs differ from PyTorch beyond {atol}: {diffs}")
     return diffs

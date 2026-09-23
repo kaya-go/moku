@@ -248,7 +248,14 @@ def board_table(
         if truth is None:
             continue
         result = reconstruct_board(
-            pred.logits, pred.boxes, pred.width, pred.height, truth.board_size, threshold, corner_method
+            pred.logits,
+            pred.boxes,
+            pred.width,
+            pred.height,
+            truth.board_size,
+            threshold,
+            corner_method,
+            pred.corner_points,
         )
         rows.append(
             {
@@ -353,7 +360,7 @@ def stone_offset(threshold: float) -> float:
 def shift_logits(preds: list[RawPrediction], offset: float) -> list[RawPrediction]:
     if not offset:
         return preds
-    return [RawPrediction(p.logits + offset, p.boxes, p.width, p.height) for p in preds]
+    return [replace(p, logits=p.logits + offset) for p in preds]
 
 
 def evaluate(

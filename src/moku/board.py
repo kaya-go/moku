@@ -249,23 +249,35 @@ def reconstruct_board(
     board_size: int,
     threshold: float = KAYA_STONE_THRESHOLD,
     corner_method: str = "kaya",
+    corner_points: np.ndarray | None = None,
 ) -> BoardResult:
     """Full Kaya pipeline: raw detector outputs → position on a ``board_size`` grid.
 
-    ``corner_method="fit"`` replaces Kaya's corner choice by the stone-fit prototype
-    (:mod:`moku.corner_fit`), which is not in Kaya yet.
+    Not in Kaya yet: ``corner_method="fit"`` replaces Kaya's corner choice by the stone-fit
+    prototype (:mod:`moku.corner_fit`); ``"head"`` / ``"head+fit"`` take the corner candidates
+    from the corner head (``corner_points``, :mod:`moku.corner_head`) instead of the DETR queries.
     """
     dets = decode_queries(logits, boxes, width, height)
-    corners, detected, n_candidates = select_corners(dets, width, height)
+    corner_dets = dets
+    if corner_method.startswith("head"):
+        if corner_points is None:
+            raise ValueError(f"corner method {corner_method!r} needs a model with the corner head")
+        corner_dets = Detections(
+            centers=corner_points[:, :2] * [width, height],
+            classes=np.full(len(corner_points), CORNER),
+            scores=corner_points[:, 2],
+        )
+    corners, detected, n_candidates = select_corners(corner_dets, width, height)
     if not detected:
         grid = np.zeros((board_size, board_size), dtype=np.int8)
         return BoardResult(grid=grid, corners=corners, corners_detected=False, n_corner_candidates=n_candidates)
     stone = (dets.classes != CORNER) & (dets.scores >= threshold)
-    if corner_method == "fit":
+    if corner_method.endswith("fit"):
         from moku.corner_fit import fit_corners
 
-        corners = fit_corners(corners, corner_candidates(dets, width, height), dets.centers[stone], board_size)
-    elif corner_method != "kaya":
+        candidates = corner_candidates(corner_dets, width, height)
+        corners = fit_corners(corners, candidates, dets.centers[stone], board_size)
+    elif corner_method not in ("kaya", "head"):
         raise ValueError(f"unknown corner method {corner_method!r}")
     cells = np.vectorize(_CELL_OF_CLASS.get)(dets.classes[stone]) if stone.any() else np.zeros(0, dtype=int)
     grid = snap_to_grid(dets.centers[stone], cells, dets.scores[stone], corners, board_size)

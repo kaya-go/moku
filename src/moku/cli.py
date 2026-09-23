@@ -85,7 +85,9 @@ def eval_cmd(
     device: str | None = typer.Option(None, help="cuda / mps / cpu (default: best available)."),
     logit_offset: float = typer.Option(0.0, help="Evaluate as if exported with this logit offset (all models)."),
     corners: list[str] = typer.Option(
-        ["kaya"], "--corners", help="Corner selection(s): kaya, fit (stone-fit prototype). Repeat to compare."
+        ["kaya"],
+        "--corners",
+        help="Corner selection(s): kaya, fit (stone fit), head, head+fit (corner head). Repeat to compare.",
     ),
 ) -> None:
     """Evaluate models: detection metrics and end-to-end board metrics (Kaya pipeline).

@@ -75,6 +75,8 @@ class TrainConfig:
     max_hours: float | None = None  # stop cleanly (and save) past this budget
     limit_train: int | None = None  # smoke tests: truncate the training set
     limit_eval: int | None = None
+    corner_head: bool = False  # train the dense corner head (moku.corner_head) with the detector
+    corner_head_weight: float = 1.0
     profile_steps: int = 0  # > 0: profile that many steps after a warm-up, print the top ops and stop
     device: str | None = None
 
@@ -220,13 +222,18 @@ def evaluate_model(model, processor, split, device: str) -> dict[str, float]:
     result = evaluate(TorchDetector(model, processor, name="ema", device=device), split, "validation", batch_size=16)
     model.train(was_training)
     b = result.board
-    return {
+    metrics = {
         "perfect": b["perfect"],
         "errors": b["errors"],
         "le2_errors": b["le2_errors"],
         "corner_fail": b["corner_fail"],
         **{k: v for k, v in result.detection.items() if not k.startswith("AP/")},
     }
+    if hasattr(model, "corner_head"):  # monitored only: checkpoints are still selected on Kaya's pipeline
+        for method in ("head", "head+fit"):
+            h = result.with_corner_method(method).board
+            metrics.update({f"{method}/perfect": h["perfect"], f"{method}/corner_fail": h["corner_fail"]})
+    return metrics
 
 
 def selection_key(metrics: dict[str, float]) -> tuple[float, float]:
@@ -294,6 +301,7 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
     from datasets import load_dataset
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
 
+    from moku.corner_head import attach_corner_head, encoder_features
     from moku.training.matcher import install as install_blockwise_matcher
 
     install_blockwise_matcher()
@@ -325,7 +333,10 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
         id2label=ID_TO_CATEGORY,
         label2id=CATEGORIES,
         ignore_mismatched_sizes=True,
-    ).to(device)
+    )
+    if cfg.corner_head:
+        attach_corner_head(model)
+    model = model.to(device)
     ema = ModelEMA(model, cfg.ema_decay, cfg.ema_tau)
     optimizer = torch.optim.AdamW(
         param_groups(model, cfg.lr, cfg.backbone_lr_mult, cfg.weight_decay), lr=cfg.lr, betas=(0.9, 0.999)
@@ -389,7 +400,12 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
             labels = [{k: v.to(device, non_blocking=True) for k, v in lab.items()} for lab in labels]
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp):
                 out = model(pixel_values=images, labels=labels)
-            loss = out.loss
+                loss_dict = dict(out.loss_dict or {})
+                loss = out.loss
+                if cfg.corner_head:
+                    head_losses = model.corner_head.loss(model.corner_head(encoder_features(out)), labels)
+                    loss = loss + cfg.corner_head_weight * sum(head_losses.values())
+                    loss_dict.update(head_losses)
             if not torch.isfinite(loss):
                 skipped += 1
                 optimizer.zero_grad(set_to_none=True)
@@ -417,7 +433,7 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
                     "ema_decay": ema.current_decay(),
                     "img_per_s": n_seen / (time.time() - t_epoch),
                     "data_wait": t_data / (time.time() - t_epoch),
-                    **{f"loss/{k}": v.item() for k, v in (out.loss_dict or {}).items() if "_aux_" not in k},
+                    **{f"loss/{k}": v.item() for k, v in loss_dict.items() if "_aux_" not in k},
                 }
                 run.log(record)
                 print(
@@ -458,6 +474,11 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
                 f"corner fail {metrics['corner_fail']:.0%}, mAP@50 {metrics['mAP@50']:.3f}, "
                 f"TP score stone {metrics['stone_tp_score']:.2f} / corner {metrics['corner_tp_score']:.2f}"
             )
+            if "head/perfect" in metrics:
+                print(
+                    f"   corner head: perfect {metrics['head/perfect']:.0%} (+fit {metrics['head+fit/perfect']:.0%}), "
+                    f"corner fail {metrics['head/corner_fail']:.0%} (+fit {metrics['head+fit/corner_fail']:.0%})"
+                )
             if best is None or selection_key(metrics) > selection_key(best["metrics"]):
                 best = {"epoch": epoch, "iter": it, "metrics": metrics}
                 run.save_checkpoint("best", ema.module, processor, best)
