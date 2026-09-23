@@ -56,8 +56,17 @@ only filters false corners outside the board, and it changes Kaya's 3-class cont
 - [ ] B2 (launched 2026-09-23, `b2-rtdetr-real-rf-s0`): RT-DETR, real photos only (v3 real +
   Roboflow train), corrected corners. Compare with B1 (`b1-rtdetr-real-s0`, no Roboflow, old
   labels) and B0 (`b0-rtdetr-s0/1`, with generated images).
-- [ ] Post-processing selection/refinement prototype.
-- [ ] Corner head.
+- [x] Post-processing selection/refinement prototype: `moku.corner_fit`, `moku eval --corners fit`.
+  Every convex quad of 4 (or 3 completed) among the 8 best deduplicated candidates is scored by the
+  mean clipped distance of the detected stones to its grid (+ collisions, + a small rank prior);
+  it replaces Kaya's quad when better by 0.02 cell, then a least-squares homography from the
+  inlier stones refines it (≤ 1 cell per corner, kept only if the fit improves). Needs ≥ 8 stones.
+- [x] Corner head (`moku.corner_head`, `--corner-head`): CenterNet-style heatmap + sub-cell
+  offset on the stride-8 encoder map (conv 256→64→64→3, ~1.2 GFLOPs), penalty-reduced focal loss
+  (σ = 1 cell of the heatmap) + L1 offset, weight 1. Decoded in-graph into the 8 best local maxima,
+  ONNX output `corner_points` `(batch, 8, 3)` = x, y in [0, 1], score. `moku eval --corners head`
+  (Kaya's selection on the head points) and `head+fit`. Checkpoints still selected on Kaya's pipeline.
+- [ ] H1 (launched 2026-09-23, `h1-rtdetr-real-rf-head-s0`): B2 + corner head.
 
 ## Results
 

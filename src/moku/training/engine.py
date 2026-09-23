@@ -77,6 +77,7 @@ class TrainConfig:
     limit_eval: int | None = None
     corner_head: bool = False  # train the dense corner head (moku.corner_head) with the detector
     corner_head_weight: float = 1.0
+    select_on: str = "kaya"  # corner method whose validation metrics pick the best checkpoint (kaya, head, ...)
     profile_steps: int = 0  # > 0: profile that many steps after a warm-up, print the top ops and stop
     device: str | None = None
 
@@ -236,9 +237,11 @@ def evaluate_model(model, processor, split, device: str) -> dict[str, float]:
     return metrics
 
 
-def selection_key(metrics: dict[str, float]) -> tuple[float, float]:
-    """Best checkpoint: most perfect boards, then fewest wrong intersections."""
-    return metrics["perfect"], -metrics["errors"]
+def selection_key(metrics: dict[str, float], select_on: str = "kaya") -> tuple[float, float]:
+    """Best checkpoint: most perfect boards, then fewest wrong intersections (or corner failures)."""
+    if select_on == "kaya":
+        return metrics["perfect"], -metrics["errors"]
+    return metrics[f"{select_on}/perfect"], -metrics[f"{select_on}/corner_fail"]
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +482,7 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
                     f"   corner head: perfect {metrics['head/perfect']:.0%} (+fit {metrics['head+fit/perfect']:.0%}), "
                     f"corner fail {metrics['head/corner_fail']:.0%} (+fit {metrics['head+fit/corner_fail']:.0%})"
                 )
-            if best is None or selection_key(metrics) > selection_key(best["metrics"]):
+            if best is None or selection_key(metrics, cfg.select_on) > selection_key(best["metrics"], cfg.select_on):
                 best = {"epoch": epoch, "iter": it, "metrics": metrics}
                 run.save_checkpoint("best", ema.module, processor, best)
                 print(f"   ★ new best (epoch {epoch})")
