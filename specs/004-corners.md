@@ -66,11 +66,43 @@ only filters false corners outside the board, and it changes Kaya's 3-class cont
   (σ = 1 cell of the heatmap) + L1 offset, weight 1. Decoded in-graph into the 8 best local maxima,
   ONNX output `corner_points` `(batch, 8, 3)` = x, y in [0, 1], score. `moku eval --corners head`
   (Kaya's selection on the head points) and `head+fit`. Checkpoints still selected on Kaya's pipeline.
-- [ ] H1 (launched 2026-09-23, `h1-rtdetr-real-rf-head-s0`): B2 + corner head.
+- [x] H1 (`h1-rtdetr-real-rf-head-s0`): B2 + corner head, 72 epochs.
+- [x] F1 (`f1-v2-frozen-head`): corner head alone on frozen moku-v2 (`--freeze-detector`), 24 epochs.
+- [ ] G1 (`g1-v2-ft-head`): F1 fine-tuned end to end (lr 2e-5, 20 epochs, selected on `head`).
+- [ ] F2 (`f2-v2-frozen-head128`): F1 with a 128-channel head, 100 epochs.
 
 ## Results
 
-_Pending._ Resume point (2026-09-23, paused for budget):
+### 2026-09-23 night: data, stone fit, corner head
+
+Perfect boards (strict), 90% CI, paired Δ vs moku-v2 (Kaya pipeline). Corner fail = a corner more
+than half a cell off. v4 labels with corrected corners. `best` = checkpoint selected on validation.
+
+| Model | Corners | Val (129) | Test (113) | Gomrade (104) | Corner fail val / test / Gomrade |
+|---|---|---|---|---|---|
+| moku-v2 | kaya | 29% | 30% | 28% | 52 / 54 / 54% |
+| moku-v2 | fit | 29% (+1) | 32% (+2 [0, +5]) | 33% (+5 [−5, +14]) | 44 / 43 / 39% |
+| moku-v3 | kaya | 15% (−14) | 19% (−12) | 2% (−26) | 55 / 63 / 79% |
+| B0 `b0-rtdetr-s0` | kaya | 15% (−14) | | | 74% (val) |
+| B1 `b1-rtdetr-real-s0` | kaya | 24% (−5) | | | 66% (val) |
+| B2 `b2-rtdetr-real-rf-s0` best (ep 20) | kaya | 33% (+4) | 19% (−11 [−19, −2]) | 19% (−9) | 58 / 70 / 62% |
+| B2 last (ep 72) | kaya | 8% | 6% | 4% | 68 / 81 / 56% |
+| H1 best (ep 12) | head | 42% (+13 [+3, +22]) | 41% (+11 [+2, +19]) | 24% (−4 [−16, +9]) | 23 / 28 / 16% |
+| F1 (v2 frozen + head) | head | 34% (+5 [+2, +11]) | 34% (+4 [0, +8]) | 37% (+9 [+3, +15]) | 29 / 30 / 33% |
+| F1 | head+fit | 34% (+5) | 38% (+8 [+3, +14]) | 34% (+6) | 25 / 22 / 27% |
+
+- Data lever: removing the generated images and adding Roboflow (B0 → B1 → B2) helps on
+  validation, but B2's 33% is selection bias: 19% on test, and every run from the PekingU base
+  peaks around epoch 12–20 then degrades (B2 last: 8%). moku-v2 stays the best stone detector.
+- Stone fit (`--corners fit`): consistently fewer corner failures (−8 to −17 points) and errors,
+  small perfect-board gains; on the corner head's points it sometimes hurts (H1 head+fit < head).
+- Corner head: the largest lever. H1's head halves corner failures (16–28% vs 54% for v2), and does
+  not degrade with training like the DETR corners. On frozen v2 (F1) the head is weaker (loss 0.9 vs
+  0.18) but keeps v2's stones: +4 to +9 points everywhere.
+- Stone threshold (B2, per source): 0.035 is best on every source but the peak is sharp
+  (go_chess 54% at 0.035, 8% at 0.05): scores are low (TP ≈ 0.06–0.1), which is why users tune the slider.
+
+Resume point (2026-09-23, before G1/F2) — previous resume point:
 
 1. `moku runs list` for B0, B1, B2 (all finished by then); `moku eval` their `best/` and `last/`
    with v2/v3 on moku-v4 validation/test (new labels) and Gomrade; `moku calibrate` the winner.

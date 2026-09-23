@@ -90,12 +90,18 @@ def refine_on_stones(corners: np.ndarray, stones: np.ndarray, board_size: int, i
     return refined
 
 
-def fit_corners(kaya: np.ndarray, candidates: np.ndarray, stones: np.ndarray, board_size: int) -> np.ndarray:
-    """Board corners (TL..BL) chosen and refined on the stones; Kaya's when the stones are too few."""
+def fit_corners(
+    kaya: np.ndarray, candidates: np.ndarray, stones: np.ndarray, board_size: int, select: bool = True
+) -> np.ndarray:
+    """Board corners (TL..BL) chosen (``select``) and refined on the stones; Kaya's when the stones are too few.
+
+    Selection helps DETR corner candidates but hurts the corner head's, whose top quad is usually
+    right (a larger wrong quad can swallow stones lying off the board): the head's is only refined.
+    """
     if len(stones) < MIN_STONES:
         return kaya
     best, best_cost = kaya, grid_cost(kaya, stones, board_size) - KAYA_MARGIN
-    for quad, prior in candidate_quads(candidates):
+    for quad, prior in candidate_quads(candidates) if select else ():
         cost = grid_cost(quad, stones, board_size) + prior
         if cost < best_cost:
             best, best_cost = quad, cost

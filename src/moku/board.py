@@ -276,7 +276,8 @@ def reconstruct_board(
         from moku.corner_fit import fit_corners
 
         candidates = corner_candidates(corner_dets, width, height)
-        corners = fit_corners(corners, candidates, dets.centers[stone], board_size)
+        select = not corner_method.startswith("head")  # the head's quad is only refined
+        corners = fit_corners(corners, candidates, dets.centers[stone], board_size, select)
     elif corner_method not in ("kaya", "head"):
         raise ValueError(f"unknown corner method {corner_method!r}")
     cells = np.vectorize(_CELL_OF_CLASS.get)(dets.classes[stone]) if stone.any() else np.zeros(0, dtype=int)
