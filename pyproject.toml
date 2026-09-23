@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "moku"
-version = "0.1.0"
-description = "Object detection model for converting goban photos to SGF files"
+version = "0.2.0"
+description = "Go board (goban) detector for photo-to-SGF conversion in Kaya"
 authors = [{ name = "Hadrien Mary", email = "hadrien.mary@gmail.com" }]
 dependencies = []
 
@@ -17,9 +17,6 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["I"]
-
-[tool.ruff.lint.per-file-ignores]
-"notebooks/**" = ["I"]
 
 [project.scripts]
 moku = "moku.cli:app"
