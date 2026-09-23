@@ -89,11 +89,9 @@ def launch(run_name: str, train_args: list[str], **kwargs) -> str:
 def list_runs(bucket: str = RUNS_BUCKET) -> list[str]:
     from huggingface_hub import HfApi
 
-    return sorted(
-        f.path.rstrip("/")
-        for f in HfApi().list_bucket_tree(bucket)
-        if type(f).__name__ == "BucketFolder" and not f.path.startswith("_")
-    )
+    # The tree may come back recursive (files only): a run is a top-level folder.
+    names = {f.path.split("/")[0] for f in HfApi().list_bucket_tree(bucket) if "/" in f.path.rstrip("/")}
+    return sorted(name for name in names if not name.startswith("_"))
 
 
 def fetch_run(run: str, bucket: str = RUNS_BUCKET, dest: Path = LOCAL_RUNS) -> Path:
