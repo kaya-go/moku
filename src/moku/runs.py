@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -26,33 +27,58 @@ def git_state() -> str:
     return sha + ("-dirty" if dirty.strip() else "")
 
 
+PIXI_IMAGE = "ghcr.io/prefix-dev/pixi:0.81.0"
+JOB_FILES = ("pixi.toml", "pixi.lock", "pyproject.toml", "src", "scripts")
+JOB_STAGING = LOCAL_RUNS / "_job"
+
+
+def stage_project(dest: Path = JOB_STAGING) -> Path:
+    """Copy what a job needs (locked pixi project, package, scripts) into ``dest``, caches excluded."""
+    import shutil
+
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    ignore = shutil.ignore_patterns("__pycache__", "*.egg-info", ".DS_Store")
+    for name in JOB_FILES:
+        if Path(name).is_dir():
+            shutil.copytree(name, dest / name, ignore=ignore)
+        else:
+            shutil.copy2(name, dest / name)
+    return dest
+
+
 def launch_command(
     run_name: str,
     train_args: list[str],
-    flavor: str = "a10g-large",
+    flavor: str = "a100-large",
     timeout: str = "3h",
     bucket: str = RUNS_BUCKET,
 ) -> list[str]:
-    """``hf jobs uv run`` command: ``src/`` mounted read-only, the runs bucket read-write."""
+    """``hf jobs run`` in the pixi image: the project is installed from ``pixi.lock`` (``cuda`` env).
+
+    The staged project is mounted read-only at ``/moku-ro`` and copied (pixi writes ``.pixi/``);
+    the runs bucket is mounted read-write at ``/runs``.
+    """
+    train = shlex.join(["python", "scripts/train.py", "--run-name", run_name, "--output-dir", "/runs", *train_args])
     return [
-        "hf", "jobs", "uv", "run", "--detach",
+        "hf", "jobs", "run", "--detach",
         "--flavor", flavor,
         "--timeout", timeout,
         "--name", run_name,
         "--label", "moku",
         "--secrets", "HF_TOKEN",
         "--env", f"MOKU_GIT={git_state()}",
-        "--volume", "./src:/moku-src",
+        "--volume", f"./{JOB_STAGING}:/moku-ro",
         "--volume", f"{BUCKET_PREFIX}{bucket}:/runs",
-        "scripts/train.py",
-        "--run-name", run_name,
-        "--output-dir", "/runs",
-        *train_args,
+        PIXI_IMAGE,
+        "bash", "-c", f"cp -r /moku-ro /moku && cd /moku && pixi run --frozen -e cuda {train}",
     ]  # fmt: skip
 
 
 def launch(run_name: str, train_args: list[str], **kwargs) -> str:
-    """Launch a training job; returns its URL."""
+    """Stage the project and launch a training job; returns its URL."""
+    stage_project()
     proc = subprocess.run(launch_command(run_name, train_args, **kwargs), capture_output=True, text=True)
     match = re.search(r"url=(\S+)", proc.stdout + proc.stderr)
     if proc.returncode != 0 or not match:

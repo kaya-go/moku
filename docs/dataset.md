@@ -1,4 +1,4 @@
-# Dataset: kaya-go/moku-v1 → v2
+# Datasets: kaya-go/moku-v1 → v4, and the Gomrade evaluation set
 
 ## Overview
 
@@ -205,3 +205,32 @@ Generated images are added to train only.
 5. Push as `kaya-go/moku-v3` on HF Hub (single config, no sub-configs)
 
 Built with `moku dataset build-v3 --push kaya-go/moku-v3` (`moku.dataset.build_v3`).
+
+## Dataset v4: kaya-go/moku-v4 (private for now)
+
+Built by `moku dataset build-v4 --roboflow <export>` (`moku.external.build_v4`); see
+`specs/003-external-eval-data.md`.
+
+- **Base**: moku-v3, every split unchanged (`source_dataset` tells the subsets apart).
+- **Added**: Roboflow Universe `my-go-detection` (CC BY 4.0, exported 2026-09-23 as COCO): 367
+  real photos with the moku classes (its `go-board` class is dropped), including the first 9×9 (33)
+  and 13×13 (29) boards. `source_dataset = my_go_detection`.
+- **Split** by photo (same original file name, or same position up to symmetry), 50/25/25:
+  226 train / 77 validation / 64 test images.
+- **Resolution**: training copies are downscaled to ≤1280 px (fast augmentation); validation and
+  test keep the original phone resolution (up to 4096 px), which is what Kaya receives.
+- Totals: train 1608, validation 130, test 114.
+
+## Gomrade evaluation set: kaya-go/moku-gomrade (private, evaluation only)
+
+Built by `moku dataset build-gomrade --root <kaggle archive>` (`moku.external.load_gomrade`) from
+[Gomrade](https://www.kaggle.com/datasets/davids1992/gomrade-dataset-go-baduk-images-with-labels)
+(CC BY-NC-ND 4.0: never used for training, never made public).
+
+- Video frames of real 19×19 games; each frame has its position (`.`/`B`/`W` text grid) and each
+  game its 4 clicked grid corners (`board_extractor_state.yml`).
+- 6 folders of rendered lesson diagrams are dropped (`GOMRADE_DIGITAL`); 40 games remain.
+- 3 frames per game, spread by stone count (empty boards skipped): 104 boards, split `test`.
+- Boxes are synthesized from the position through the corners' homography, so board metrics
+  recover the recorded position exactly; mAP is meaningless here (box sizes are synthetic).
+- `source_dataset = gomrade/<game>`: board-metric CIs bootstrap over games.

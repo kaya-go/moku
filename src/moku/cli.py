@@ -374,11 +374,11 @@ def generate(
 def train_launch(
     ctx: typer.Context,
     run_name: str = typer.Argument(..., help="Run name (directory in the runs bucket)."),
-    flavor: str = typer.Option("a10g-large"),
+    flavor: str = typer.Option("a100-large", help="a10g-large is cheaper but often unavailable."),
     timeout: str = typer.Option("3h"),
     dry_run: bool = typer.Option(False, help="Print the hf jobs command without launching."),
 ) -> None:
-    """Launch scripts/train.py on HF Jobs; extra arguments go to the script (e.g. --model dfine-s --seed 1)."""
+    """Launch scripts/train.py on HF Jobs (pixi image, locked `cuda` env); extra arguments go to the script."""
     from moku.runs import launch, launch_command
 
     if dry_run:

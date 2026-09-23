@@ -59,14 +59,18 @@ background.
 
 ## Results
 
-**Gomrade (104 boards, 40 games), stone threshold 0.035** — v3's regression is confirmed on
-independent real photos:
+Baselines at stone threshold 0.035 (90% CIs, bootstrap over photos, or over games for Gomrade):
 
-| Model | Perfect boards | Errors / board | Corner fail | stone cdAP |
+| Set | Boards (clusters) | moku-v2 perfect | moku-v3 perfect | Paired Δ v3 − v2 |
 |---|---|---|---|---|
-| moku-v2 | 29% | 62.4 | 54% | 0.823 |
-| moku-v3 | 2% | 83.9 | 79% | 0.761 |
+| v4 validation, all | 129 (79) | 33% [24–41] | 21% [14–29] | −12 [−20, −2] |
+| … v3 subset | 52 (26) | 44% [29–59] | 17% [8–30] | −27 [−43, −7] |
+| … Roboflow photos | 77 (53) | 25% [17–34] | 23% [15–34] | −1 [−8, +6] |
+| v4 test, all | 113 (79) | 37% [29–45] | 29% [21–40] | −8 [−17, +2] |
+| … v3 subset | 50 (30) | 38% [26–52] | 32% [20–47] | −6 [−18, +6] |
+| … Roboflow photos | 63 (50) | 37% [27–46] | 27% [17–40] | −10 [−20, +4] |
+| Gomrade | 104 (40 games) | 29% [19–39] | 2% [0–5] | −27 [−37, −17] |
 
-Paired Δ v3 − v2: −27 points of perfect boards (CI [−35, −19]; CIs here were computed over
-positions, before the per-game clustering fix, so they are too narrow). mAP@50 is meaningless on
+Median true-positive score (stone / corner) stays around 0.05–0.1 for both models on every set.
+v3's regression is confirmed on independent real photos (Gomrade). mAP@50 is meaningless on
 Gomrade (synthesized box sizes); use cdAP and board metrics.

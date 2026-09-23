@@ -62,7 +62,7 @@ class TrainConfig:
     oversample_real: int = 3
     source: str | None = None  # "real" or "generated" to train on one source only
     seed: int = 0
-    workers: int | None = None  # default: every available CPU
+    workers: int | None = None  # default: available CPUs minus 2
     amp: bool = True  # bf16 autocast on CUDA
     eval_every: int = 1
     log_every: int = 25
@@ -242,6 +242,12 @@ def seed_everything(seed: int) -> None:
 
 
 def _worker_init(worker_id: int) -> None:
+    import cv2
+
+    # One thread per worker: OpenCV otherwise spawns a pool per worker, and the oversubscribed
+    # CPUs starve the main process (loss matching, kernel launches).
+    cv2.setNumThreads(1)
+    torch.set_num_threads(1)
     seed = torch.initial_seed() % 2**32
     random.seed(seed)
     np.random.seed(seed)
@@ -277,7 +283,7 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
     run = RunDir(Path(cfg.output_dir) / cfg.run_name)
     seed_everything(cfg.seed)
     device = cfg.device or _default_device()
-    workers = cfg.workers if cfg.workers is not None else available_cpus()
+    workers = cfg.workers if cfg.workers is not None else max(1, available_cpus() - 2)  # 2 CPUs for the main process
     if device == "cuda":
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True

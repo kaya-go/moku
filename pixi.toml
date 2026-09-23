@@ -41,3 +41,14 @@ moku = { path = ".", editable = true }
 faster-coco-eval = ">=1.8.0, <2"
 # From PyPI: albucore imports `simsimd`, which conda-forge 7.x only ships as `numkong`.
 albumentations = ">=2.0.8, <3"
+
+# GPU training environment for HF Jobs (`moku train launch`): same packages, CUDA builds of PyTorch.
+[feature.cuda]
+platforms = ["linux-64"]
+system-requirements = { cuda = "12" }
+
+[feature.cuda.dependencies]
+pytorch-gpu = ">=2.13.0,<3"
+
+[environments]
+cuda = { features = ["cuda"] }
