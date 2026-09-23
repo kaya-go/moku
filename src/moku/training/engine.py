@@ -77,6 +77,7 @@ class TrainConfig:
     limit_eval: int | None = None
     corner_head: bool = False  # train the dense corner head (moku.corner_head) with the detector
     corner_head_weight: float = 1.0
+    freeze_detector: bool = False  # train the corner head alone on a frozen detector (e.g. --model kaya-go/moku-v2)
     select_on: str = "kaya"  # corner method whose validation metrics pick the best checkpoint (kaya, head, ...)
     profile_steps: int = 0  # > 0: profile that many steps after a warm-up, print the top ops and stop
     device: str | None = None
@@ -337,6 +338,8 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
         label2id=CATEGORIES,
         ignore_mismatched_sizes=True,
     )
+    if cfg.freeze_detector:
+        model.requires_grad_(False)
     if cfg.corner_head:
         attach_corner_head(model)
     model = model.to(device)
@@ -391,7 +394,9 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
             print(f"Epoch {epoch}: strong augmentation off, EMA restarted")
             loader = _loader(light, cfg, workers, cfg.seed + epoch)
             ema.restart()
-        model.train()
+        model.train(not cfg.freeze_detector)
+        if cfg.freeze_detector:
+            model.corner_head.train()
         t_epoch, t_data, n_seen, skipped = time.time(), 0.0, 0, 0
         running: dict[str, float] = {}
         t0 = time.time()
@@ -402,9 +407,13 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
                 images = (images - normalize[0]) / normalize[1]
             labels = [{k: v.to(device, non_blocking=True) for k, v in lab.items()} for lab in labels]
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp):
-                out = model(pixel_values=images, labels=labels)
-                loss_dict = dict(out.loss_dict or {})
-                loss = out.loss
+                if cfg.freeze_detector:
+                    with torch.no_grad():
+                        out = model(pixel_values=images)
+                    loss_dict, loss = {}, 0.0
+                else:
+                    out = model(pixel_values=images, labels=labels)
+                    loss_dict, loss = dict(out.loss_dict or {}), out.loss
                 if cfg.corner_head:
                     head_losses = model.corner_head.loss(model.corner_head(encoder_features(out)), labels)
                     loss = loss + cfg.corner_head_weight * sum(head_losses.values())
