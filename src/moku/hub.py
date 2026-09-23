@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from moku.inference import download_wandb_model
+from moku.inference import resolve_source
 
 CARD_TEMPLATE = """---
 library_name: transformers
@@ -57,11 +57,6 @@ def model_card(
     )
 
 
-def resolve_source(source: str) -> str:
-    """Local directory for a ``wandb:`` artifact; anything else is passed through."""
-    return str(download_wandb_model(source[6:])) if source.startswith("wandb:") else source
-
-
 def publish_model(
     source: str,
     repo_id: str,
@@ -69,7 +64,7 @@ def publish_model(
     onnx_path: Path | None = None,
     card: str | None = None,
 ) -> str:
-    """Push ``source`` (``wandb:<artifact>``, local dir or Hub repo) to ``repo_id``."""
+    """Push ``source`` (bucket checkpoint, local dir or Hub repo) to ``repo_id``."""
     from huggingface_hub import HfApi
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
 

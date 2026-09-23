@@ -22,18 +22,24 @@ printed as tables or saved as files (PNG, JSON).
 ## Tech Stack & Environment
 
 - **Package Manager**: `pixi` (strictly enforced; do NOT use pip/conda directly).
-- **Training**: `scripts/train.py` is a self-contained PEP 723 script run on HF Jobs
-  (`hf jobs uv run ...`); it cannot import `moku`. Keep its dependency header in sync with `pixi.toml`.
-- **Tracking**: W&B project `hadim/moku` (best checkpoints are saved as W&B artifacts).
-- **Secrets**: `.env` (`WANDB_API_KEY`, `WANDB_ENTITY`, `WANDB_PROJECT`, `GEMINI_API_KEY`), loaded by the CLI.
+- **Training**: code in `src/moku/training/`; `scripts/train.py` is a thin PEP 723 entry point run on
+  HF Jobs by `moku train launch` (`src/` mounted at `/moku-src`, so it imports `moku`). Keep its
+  dependency header in sync with `pixi.toml`. Jobs run in the `hadim` namespace (`kaya-go` has no credits).
+- **Tracking**: no W&B. Each run writes `config.json`, `metrics.jsonl`, `train.log`, `best/`, `last/`
+  and `summary.json` to the private bucket `hf://buckets/hadim/moku-runs/<run>/` (mounted at `/runs`);
+  `moku runs list|show|pull` read them back. Give the user the HF Jobs URL of every run launched.
+- **Secrets**: `.env` (`GEMINI_API_KEY`), loaded by the CLI; `hf auth login` for the Hub and Jobs.
 
 ## Commands
 
 ```bash
 pixi run moku eval kaya-go/moku-v2 kaya-go/moku-v3 -s validation -s test --sweep  # compare models
-pixi run moku eval wandb:model-<run>:latest --figures reports/figs                   # W&B checkpoint + worst boards
+pixi run moku eval hf://buckets/hadim/moku-runs/<run>/best --figures reports/figs  # run checkpoint + worst boards
 pixi run moku export kaya-go/moku-v3 -o artifacts/model.onnx                         # ONNX + verify + latency
-pixi run moku publish wandb:model-<run> --repo kaya-go/moku-vN --onnx artifacts/model.onnx
+pixi run moku publish hf://buckets/hadim/moku-runs/<run>/best --repo kaya-go/moku-vN --onnx artifacts/model.onnx
+pixi run moku train launch <run> -- --model dfine-s --seed 1                         # HF Jobs, prints the job URL
+pixi run moku train preview-aug                                                      # augmented samples as JPEGs
+pixi run moku runs list | show <run> --plot reports/<run>.png | pull <run>          # follow runs from the bucket
 pixi run moku dataset stats | audit | build-v3
 pixi run moku annotate prepare | serve                                               # tools/annotator workflow
 pixi run moku generate --n 500                                                       # Gemini style transfer
@@ -41,6 +47,9 @@ pixi run test && pixi run lint
 ```
 
 ## Docs
+
+- `specs/`: one spec per piece of work (why, acceptance criteria, design, tasks, results). **Spec-driven**:
+  write or update the spec before coding, keep its tasks/results current; it is the resume point.
 
 - `docs/architecture.md`: architecture decisions and design rationale.
 - `docs/dataset.md`: dataset sources, harmonization rules, and raw data location.
@@ -84,7 +93,8 @@ intervals, never a single number.
 
 - **Why**: Transformer-based detector, no NMS needed (simpler ONNX export), small ResNet-18 backbone suitable for browser inference, available in HF `transformers`.
 - **Base model**: `PekingU/rtdetr_r18vd`
-- **Training**: Fine-tune with HF `Trainer` API (`scripts/train.py`).
+- **Training**: plain PyTorch loop with the reference recipe (EMA, backbone lr multiplier, stop-augmentation),
+  see `specs/001-training-loop.md`. D-FINE-S is being evaluated as a replacement (`specs/002-dfine.md`).
 - **Export**: `torch.onnx.export` with dynamic axes for batch dimension (`moku export`).
 
 ## Rules & Guidelines

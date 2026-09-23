@@ -178,10 +178,32 @@ def corner_recall_at_k(preds: list[RawPrediction], targets: list[Target], k: int
     return float(np.mean(recalls)) if recalls else float("nan")
 
 
+def true_positive_scores(preds: list[RawPrediction], targets: list[Target], frac: float = 0.02) -> dict[str, float]:
+    """Calibration: median over GT objects of the best same-class score within ``frac`` of the diagonal.
+
+    Kaya thresholds raw scores (0.035 for stones, a 0.005 floor for corners), so
+    true objects scoring far above those values make the pipeline robust.
+    """
+    found: dict[str, list[float]] = {"stone": [], "corner": []}
+    for pred, target in zip(preds, targets):
+        probs = sigmoid(pred.logits)
+        centers = pred.boxes[:, :2] * [pred.width, pred.height]
+        radius = frac * np.hypot(target.width, target.height)
+        for cls in (*STONE_CLASSES, CORNER):
+            gt = target.centers[target.categories == cls]
+            if len(gt) == 0:
+                continue
+            near = np.hypot(*(gt[:, None, :] - centers[None, :, :]).transpose(2, 0, 1)) <= radius
+            best = np.where(near, probs[None, :, cls], 0.0).max(axis=1)
+            found["corner" if cls == CORNER else "stone"].extend(best.tolist())
+    return {f"{k}_tp_score": float(np.median(v)) if v else float("nan") for k, v in found.items()}
+
+
 def detection_metrics(preds: list[RawPrediction], targets: list[Target]) -> dict[str, float]:
     metrics = coco_map(preds, targets)
     metrics["stone_cdAP"] = float(np.mean([center_distance_ap(preds, targets, c) for c in STONE_CLASSES]))
     metrics["corner_R4"] = corner_recall_at_k(preds, targets)
+    metrics.update(true_positive_scores(preds, targets))
     return metrics
 
 

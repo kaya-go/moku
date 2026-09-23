@@ -1,7 +1,6 @@
 """``moku`` command line: evaluate, export, publish, build datasets, annotate, generate.
 
-Every command loads ``.env`` from the working directory first (``WANDB_*``,
-``GEMINI_API_KEY``, ``HF_TOKEN``).
+Every command loads ``.env`` from the working directory first (``GEMINI_API_KEY``).
 """
 
 from __future__ import annotations
@@ -19,8 +18,12 @@ from rich.table import Table
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 dataset_app = typer.Typer(no_args_is_help=True, help="Build, inspect and audit datasets.")
 annotate_app = typer.Typer(no_args_is_help=True, help="Prepare and serve annotator workspaces.")
+train_app = typer.Typer(no_args_is_help=True, help="Launch training jobs on HF Jobs and preview augmentation.")
+runs_app = typer.Typer(no_args_is_help=True, help="Follow training runs (metrics and checkpoints in the runs bucket).")
 app.add_typer(dataset_app, name="dataset")
 app.add_typer(annotate_app, name="annotate")
+app.add_typer(train_app, name="train")
+app.add_typer(runs_app, name="runs")
 console = Console(width=200)
 
 DEFAULT_DATASET = "kaya-go/moku-v3"
@@ -60,12 +63,17 @@ def _num(value: float, ci: tuple[float, float] | None = None, signed: bool = Fal
 
 def _short(source: str) -> str:
     """``org/name`` → ``name``; paths → file or directory name."""
-    return Path(source.removeprefix("wandb:")).name or source
+    parts = Path(source).parts
+    if source.startswith("hf://buckets/") and len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"  # <run>/<best|last>
+    return Path(source).name or source
 
 
 @app.command("eval")
 def eval_cmd(
-    models: list[str] = typer.Argument(..., help="Hub repo ids, local dirs, wandb:<artifact> or .onnx files."),
+    models: list[str] = typer.Argument(
+        ..., help="Hub repo ids, local dirs, hf://buckets/... checkpoints or .onnx files."
+    ),
     splits: list[str] = typer.Option(["test"], "--split", "-s", help="Dataset split(s) to evaluate."),
     dataset: str = typer.Option(DEFAULT_DATASET, help="HF dataset id."),
     threshold: float = typer.Option(0.035, help="Stone score threshold (Kaya's default)."),
@@ -188,7 +196,7 @@ def export(
 
 @app.command()
 def publish(
-    source: str = typer.Argument(..., help="wandb:<artifact>, local model dir or Hub repo id."),
+    source: str = typer.Argument(..., help="hf://buckets/... checkpoint, local model dir or Hub repo id."),
     repo: str = typer.Option(..., help="Target Hub repo, e.g. kaya-go/moku-v4."),
     onnx: Path | None = typer.Option(None, help="ONNX file to upload as model.onnx (see `moku export`)."),
     public: bool = typer.Option(False, help="Create the repo as public (default: private)."),
@@ -199,8 +207,8 @@ def publish(
     from datasets import load_dataset
 
     from moku.evaluation import evaluate
-    from moku.hub import model_card, publish_model, resolve_source
-    from moku.inference import load_detector
+    from moku.hub import model_card, publish_model
+    from moku.inference import load_detector, resolve_source
 
     path = resolve_source(source)
     ds = load_dataset(dataset)
@@ -327,3 +335,106 @@ def generate(
     from moku.generate import generate_conditioned
 
     asyncio.run(generate_conditioned(n, out_dir, model, prefix, workers, image_size))
+
+
+@train_app.command("launch", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def train_launch(
+    ctx: typer.Context,
+    run_name: str = typer.Argument(..., help="Run name (directory in the runs bucket)."),
+    flavor: str = typer.Option("a10g-large"),
+    timeout: str = typer.Option("3h"),
+    dry_run: bool = typer.Option(False, help="Print the hf jobs command without launching."),
+) -> None:
+    """Launch scripts/train.py on HF Jobs; extra arguments go to the script (e.g. --model dfine-s --seed 1)."""
+    from moku.runs import launch, launch_command
+
+    if dry_run:
+        console.print(" ".join(launch_command(run_name, ctx.args, flavor=flavor, timeout=timeout)))
+        return
+    console.print(f"{run_name}: {launch(run_name, ctx.args, flavor=flavor, timeout=timeout)}")
+
+
+@train_app.command("preview-aug")
+def train_preview_aug(
+    out: Path = typer.Option(Path("reports/augmentation")),
+    n: int = typer.Option(20),
+    light: bool = typer.Option(False, help="Preview the final-epochs pipeline (flips only)."),
+    dataset: str = typer.Option(DEFAULT_DATASET),
+    seed: int = typer.Option(0),
+) -> None:
+    """Save augmented training samples with their boxes, to eyeball the pipeline."""
+    from datasets import load_dataset
+
+    from moku.training.data import DetectionDataset, save_previews, train_augmentation, train_indices
+
+    split = load_dataset(dataset)["train"]
+    ds = DetectionDataset(split, train_indices(split), train_augmentation(strong=not light))
+    console.print(f"Saved {len(save_previews(ds, out, n, seed))} samples to {out}")
+
+
+def _run_row(name: str, run: dict) -> dict:
+    cfg, epochs, best = run["config"], run["epochs"], run["best"]
+    last = epochs.iloc[-1] if len(epochs) else {}
+    m = best.get("metrics", {})
+    return {
+        "run": name,
+        "model": cfg.get("model", "?"),
+        "status": run["summary"].get("status", "running"),
+        "epoch": f"{int(last.get('epoch', 0))}/{cfg.get('epochs', '?')}",
+        "img/s": float(last.get("img_per_s", float("nan"))),
+        "best ep": best.get("epoch", "-"),
+        "val perfect": _pct(m["perfect"]) if m else "-",
+        "val errors": _num(m["errors"]) if m else "-",
+        "corner fail": _pct(m["corner_fail"]) if m else "-",
+        "TP stone/corner": f"{m['stone_tp_score']:.2f}/{m['corner_tp_score']:.2f}" if m else "-",
+    }
+
+
+@runs_app.command("list")
+def runs_list(runs: list[str] = typer.Argument(None, help="Run names (default: every run in the bucket).")) -> None:
+    """One row per run: progress, throughput and best validation board metrics (EMA weights)."""
+    from moku.runs import fetch_run, list_runs, read_run
+
+    rows = [_run_row(name, read_run(fetch_run(name))) for name in (runs or list_runs())]
+    if rows:
+        console.print(_table(rows, "Training runs (best checkpoint = most perfect validation boards)"))
+
+
+@runs_app.command("show")
+def runs_show(
+    runs: list[str] = typer.Argument(..., help="One or more run names."),
+    plot: Path | None = typer.Option(None, help="Save training and validation curves to this PNG."),
+    every: int = typer.Option(1, help="Print one epoch out of N."),
+) -> None:
+    """Per-epoch validation metrics of runs (and their curves with --plot)."""
+    from moku.runs import fetch_run, plot_run, read_run
+
+    loaded = {name: read_run(fetch_run(name)) for name in runs}
+    for name, run in loaded.items():
+        epochs = run["epochs"]
+        cols = [
+            c
+            for c in (
+                "epoch",
+                "img_per_s",
+                "val/perfect",
+                "val/errors",
+                "val/corner_fail",
+                "val/mAP@50",
+                "val/stone_tp_score",
+                "val/corner_tp_score",
+            )
+            if c in epochs
+        ]
+        if len(epochs):
+            console.print(_table(epochs[cols].iloc[::every].to_dict("records"), name))
+    if plot is not None:
+        console.print(f"Saved {plot_run(loaded, plot)}")
+
+
+@runs_app.command("pull")
+def runs_pull(run: str, which: str = typer.Option("best", help="best or last")) -> None:
+    """Download a run's checkpoint under runs/<run>/<which>."""
+    from moku.runs import BUCKET_PREFIX, RUNS_BUCKET, pull_checkpoint
+
+    console.print(f"Downloaded to {pull_checkpoint(f'{BUCKET_PREFIX}{RUNS_BUCKET}/{run}/{which}')}")

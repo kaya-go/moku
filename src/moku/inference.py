@@ -8,7 +8,7 @@ threshold sweeps alike.
 Model sources accepted by :func:`load_detector`:
 
 - ``path/to/model.onnx`` — run with onnxruntime and Kaya's own preprocessing;
-- ``wandb:<artifact>[:<version>]`` — a W&B model artifact (``WANDB_*`` env vars);
+- ``hf://buckets/<ns>/<bucket>/<run>/<best|last>`` — a checkpoint written by a training run;
 - a local directory or a Hugging Face Hub repo id (``org/name[@revision]``).
 """
 
@@ -121,30 +121,18 @@ class OnnxDetector:
         return preds
 
 
-def download_wandb_model(artifact: str) -> Path:
-    """Download a W&B model artifact (``name[:version]``) and return its directory."""
-    import logging
-    import os
+def resolve_source(source: str) -> str:
+    """Local directory for a bucket checkpoint (downloaded under ``runs/``); anything else is passed through."""
+    from moku.runs import BUCKET_PREFIX, pull_checkpoint
 
-    import wandb
-
-    if artifact.count("/") < 2:
-        entity = os.environ.get("WANDB_ENTITY", "hadim")
-        project = os.environ.get("WANDB_PROJECT", "moku")
-        artifact = f"{entity}/{project}/{artifact}"
-    if ":" not in artifact.rsplit("/", 1)[-1]:
-        artifact += ":latest"
-    logging.getLogger("wandb").setLevel(logging.ERROR)
-    return Path(wandb.Api().artifact(artifact, type="model").download())
+    return str(pull_checkpoint(source)) if source.startswith(BUCKET_PREFIX) else source
 
 
 def load_detector(source: str, device: str | None = None) -> Detector:
-    """Load a detector from an ONNX file, a W&B artifact, a local dir or a Hub repo."""
+    """Load a detector from an ONNX file, a bucket checkpoint, a local dir or a Hub repo."""
     if source.endswith(".onnx"):
         return OnnxDetector(source)
-    if source.startswith("wandb:"):
-        return TorchDetector.from_pretrained(str(download_wandb_model(source[6:])), device, name=source)
-    return TorchDetector.from_pretrained(source, device)
+    return TorchDetector.from_pretrained(resolve_source(source), device, name=source)
 
 
 def run_detector(detector: Detector, images, batch_size: int = 8) -> list[RawPrediction]:
