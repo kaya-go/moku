@@ -32,8 +32,10 @@ The reference RT-DETR/D-FINE recipe alone (same model, same data) fixes calibrat
 ## Design
 
 - **Training code in the package** (`src/moku/training/`), so it is linted, testable and shares
-  `moku.evaluation` with `moku eval`. `scripts/train.py` is a thin PEP 723 entry point; on HF Jobs
-  `src/` is mounted at `/moku-src` (`hf jobs uv run -v ./src:/moku-src`).
+  `moku.evaluation` with `moku eval`. `scripts/train.py` is a thin entry point.
+- **Jobs run the locked pixi environment**: `moku train launch` stages `pixi.toml`, `pixi.lock`,
+  `src/` and `scripts/`, and runs `pixi run --frozen -e cuda python scripts/train.py` in the pixi
+  Docker image. Local and remote runs share one dependency set (no PEP 723 header to keep in sync).
 - **Plain PyTorch loop** instead of HF `Trainer`: param groups, EMA, per-iteration schedule, the
   augmentation switch and board-metric selection are each a few lines here and fights with `Trainer`.
 - **Recipe** (RT-DETR / D-FINE reference configs, scaled to batch 16):

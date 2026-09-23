@@ -122,20 +122,22 @@ class ModelEMA:
         for p in self.module.parameters():
             p.requires_grad_(False)
         self.decay, self.tau, self.updates = decay, tau, 0
+        self._pairs = None
 
     def current_decay(self) -> float:
         return self.decay * (1 - math.exp(-self.updates / self.tau))
 
     @torch.no_grad()
     def update(self, model: torch.nn.Module) -> None:
+        if self._pairs is None:  # state_dict tensors share storage with the modules: resolve them once
+            ema_state, state = self.module.state_dict(), model.state_dict()
+            names = [n for n, v in ema_state.items() if v.dtype.is_floating_point]
+            self._pairs = ([ema_state[n] for n in names], [state[n] for n in names])
         self.updates += 1
         d = self.current_decay()
-        source = model.state_dict()
-        for name, value in self.module.state_dict().items():
-            if value.dtype.is_floating_point:
-                value.mul_(d).add_(source[name].detach(), alpha=1 - d)
-            else:
-                value.copy_(source[name])
+        ema_tensors, model_tensors = self._pairs
+        torch._foreach_mul_(ema_tensors, d)
+        torch._foreach_add_(ema_tensors, model_tensors, alpha=1 - d)
 
     def restart(self) -> None:
         self.updates = 0

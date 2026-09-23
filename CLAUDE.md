@@ -22,9 +22,10 @@ printed as tables or saved as files (PNG, JSON).
 ## Tech Stack & Environment
 
 - **Package Manager**: `pixi` (strictly enforced; do NOT use pip/conda directly).
-- **Training**: code in `src/moku/training/`; `scripts/train.py` is a thin PEP 723 entry point run on
-  HF Jobs by `moku train launch` (`src/` mounted at `/moku-src`, so it imports `moku`). Keep its
-  dependency header in sync with `pixi.toml`. Jobs run in the `hadim` namespace (`kaya-go` has no credits).
+- **Training**: code in `src/moku/training/`, entry point `scripts/train.py`. `moku train launch` runs it on
+  HF Jobs in the pixi Docker image with the locked `cuda` environment (`pixi run --frozen -e cuda`), so
+  jobs use exactly `pixi.lock`. Jobs run in the `hadim` namespace (`kaya-go` has no credits);
+  `a100-large` is the default flavor (A10G/L40S were often unavailable).
 - **Tracking**: no W&B. Each run writes `config.json`, `metrics.jsonl`, `train.log`, `best/`, `last/`
   and `summary.json` to the private bucket `hf://buckets/hadim/moku-runs/<run>/` (mounted at `/runs`);
   `moku runs list|show|pull` read them back. Give the user the HF Jobs URL of every run launched.

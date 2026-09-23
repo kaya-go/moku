@@ -2,7 +2,11 @@
 authors = ["Hadrien Mary <hadrien.mary@gmail.com>"]
 channels = ["conda-forge"]
 name = "moku"
-platforms = ["osx-arm64", "linux-64"]
+platforms = [
+  "osx-arm64",
+  "linux-64",
+  { name = "linux-64-cuda", platform = "linux-64", cuda = "12" },
+]
 version = "0.2.0"
 
 [tasks]
@@ -44,8 +48,7 @@ albumentations = ">=2.0.8, <3"
 
 # GPU training environment for HF Jobs (`moku train launch`): same packages, CUDA builds of PyTorch.
 [feature.cuda]
-platforms = ["linux-64"]
-system-requirements = { cuda = "12" }
+platforms = ["linux-64-cuda"]
 
 [feature.cuda.dependencies]
 pytorch-gpu = ">=2.13.0,<3"
