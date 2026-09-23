@@ -171,6 +171,7 @@ def calibrate(
     ),
     json_out: Path | None = typer.Option(None, "--json"),
     device: str | None = typer.Option(None),
+    corners: str = typer.Option("kaya", help="Corner selection the boards are read with (see `moku eval`)."),
 ) -> None:
     """Fit a per-model stone threshold (as a logit offset for the ONNX) and check it on held-out sets."""
     from datasets import load_dataset
@@ -198,12 +199,12 @@ def calibrate(
     for source in models:
         detector = load_detector(source, device)
         with console.status(f"{source}: fitting on {fit}…"):
-            cal = best_offset(evaluate(detector, split_of(fit), fit))
+            cal = best_offset(evaluate(detector, split_of(fit), fit).with_corner_method(corners))
         report[source] = {"fit": fit, **cal, "checks": {}}
         for spec in check:
             with console.status(f"{source} on {spec}…"):
-                r = evaluate(detector, split_of(spec), spec)
-            shifted = board_table(shift_logits(r.predictions, cal["offset"]), r.targets)
+                r = evaluate(detector, split_of(spec), spec).with_corner_method(corners)
+            shifted = board_table(shift_logits(r.predictions, cal["offset"]), r.targets, corner_method=corners)
             a, b = board_summary(r.boards), board_summary(shifted)
             d = paired_difference(r.boards.assign(p=is_perfect(r.boards)), shifted.assign(p=is_perfect(shifted)), "p")
             report[source]["checks"][spec] = {"base": a, "calibrated": b, "delta_perfect": d}
@@ -276,8 +277,13 @@ def publish(
     public: bool = typer.Option(False, help="Create the repo as public (default: private)."),
     base_model: str = typer.Option("PekingU/rtdetr_r18vd", help="Pretrained checkpoint, for the model card."),
     dataset: str = typer.Option(DEFAULT_DATASET),
+    corners: str = typer.Option("kaya", help="Corner selection the card's board metrics use (see `moku eval`)."),
+    logit_offset: float = typer.Option(0.0, help="Logit offset baked into --onnx (for the card)."),
 ) -> None:
-    """Push weights, processor, ONNX and a model card with test/validation metrics to the Hub."""
+    """Push weights, processor, ONNX and a model card with test/validation metrics to the Hub.
+
+    With ``--onnx``, the card's metrics are those of the ONNX as Kaya runs it (offset included).
+    """
     from datasets import load_dataset
 
     from moku.evaluation import evaluate
@@ -292,14 +298,22 @@ def publish(
     ]
     for split in ("validation", "test"):
         with console.status(f"Evaluating on {split}…"):
-            r = evaluate(load_detector(path), ds[split], split)
+            r = evaluate(load_detector(str(onnx) if onnx else path), ds[split], split).with_corner_method(corners)
         d, b = r.detection, r.board
         lines.append(
             f"| {split} | {d['mAP@50']:.3f} | {d['stone_cdAP']:.3f} | {d['corner_R4']:.3f} "
             f"| {b['perfect']:.0%} [{b['perfect_ci'][0]:.0%}, {b['perfect_ci'][1]:.0%}] "
             f"| {b['errors']:.1f} [{b['errors_ci'][0]:.1f}, {b['errors_ci'][1]:.1f}] |"
         )
-    card = model_card(repo.split("/")[-1], "\n".join(lines), base_model=base_model, dataset=dataset)
+    card = model_card(
+        repo.split("/")[-1],
+        "\n".join(lines),
+        base_model=base_model,
+        dataset=dataset,
+        corner_head=r.predictions[0].corner_points is not None,
+        corners=corners,
+        logit_offset=logit_offset,
+    )
     console.print(card)
     url = publish_model(path, repo, private=not public, onnx_path=onnx, card=card)
     console.print(f"Published {url}")
