@@ -84,6 +84,9 @@ def eval_cmd(
     batch_size: int = typer.Option(8),
     device: str | None = typer.Option(None, help="cuda / mps / cpu (default: best available)."),
     logit_offset: float = typer.Option(0.0, help="Evaluate as if exported with this logit offset (all models)."),
+    corners: list[str] = typer.Option(
+        ["kaya"], "--corners", help="Corner selection(s): kaya, fit (stone-fit prototype). Repeat to compare."
+    ),
 ) -> None:
     """Evaluate models: detection metrics and end-to-end board metrics (Kaya pipeline).
 
@@ -100,9 +103,8 @@ def eval_cmd(
         results = []
         for source in models:
             with console.status(f"{source} on {split}…"):
-                results.append(
-                    evaluate(load_detector(source, device), ds[split], split, threshold, batch_size, logit_offset)
-                )
+                r = evaluate(load_detector(source, device), ds[split], split, threshold, batch_size, logit_offset)
+            results += [r if method == "kaya" else r.with_corner_method(method, threshold) for method in corners]
         rows = []
         for r in results:
             d, b = r.detection, r.board

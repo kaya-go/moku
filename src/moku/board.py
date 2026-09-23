@@ -179,27 +179,31 @@ def _complete_three_corners(points: np.ndarray) -> np.ndarray:
     return best
 
 
-def select_corners(dets: Detections, width: int, height: int) -> tuple[np.ndarray, bool, int]:
-    """Kaya's corner selection. Returns ``(corners TL..BL, corners_detected, n_candidates)``."""
+def corner_candidates(dets: Detections, width: int, height: int) -> np.ndarray:
+    """Corner detections above the score floor, highest first, near-duplicates dropped."""
     keep = (dets.classes == CORNER) & (dets.scores >= CORNER_MIN_SCORE)
     centers, scores = dets.centers[keep], dets.scores[keep]
-    order = np.argsort(-scores, kind="stable")
-    centers = centers[order]
+    centers = centers[np.argsort(-scores, kind="stable")]
 
     min_dist = np.hypot(width, height) * CORNER_DEDUP_FRACTION
     kept: list[np.ndarray] = []
     for c in centers:
         if all(np.hypot(*(c - k)) >= min_dist for k in kept):
             kept.append(c)
+    return np.array(kept).reshape(-1, 2)
 
+
+def select_corners(dets: Detections, width: int, height: int) -> tuple[np.ndarray, bool, int]:
+    """Kaya's corner selection. Returns ``(corners TL..BL, corners_detected, n_candidates)``."""
+    kept = corner_candidates(dets, width, height)
     if len(kept) < 2:
         return inset_corners(width, height), False, len(kept)
     if len(kept) == 2:
         quad = _complete_two_corners(kept[0], kept[1], width, height)
     elif len(kept) == 3:
-        quad = _complete_three_corners(np.array(kept))
+        quad = _complete_three_corners(kept)
     else:
-        quad = np.array(kept[:4])
+        quad = kept[:4]
     corners = order_corners(quad)
 
     span = corners.max(axis=0) - corners.min(axis=0)
@@ -244,14 +248,25 @@ def reconstruct_board(
     height: int,
     board_size: int,
     threshold: float = KAYA_STONE_THRESHOLD,
+    corner_method: str = "kaya",
 ) -> BoardResult:
-    """Full Kaya pipeline: raw detector outputs → position on a ``board_size`` grid."""
+    """Full Kaya pipeline: raw detector outputs → position on a ``board_size`` grid.
+
+    ``corner_method="fit"`` replaces Kaya's corner choice by the stone-fit prototype
+    (:mod:`moku.corner_fit`), which is not in Kaya yet.
+    """
     dets = decode_queries(logits, boxes, width, height)
     corners, detected, n_candidates = select_corners(dets, width, height)
     if not detected:
         grid = np.zeros((board_size, board_size), dtype=np.int8)
         return BoardResult(grid=grid, corners=corners, corners_detected=False, n_corner_candidates=n_candidates)
     stone = (dets.classes != CORNER) & (dets.scores >= threshold)
+    if corner_method == "fit":
+        from moku.corner_fit import fit_corners
+
+        corners = fit_corners(corners, corner_candidates(dets, width, height), dets.centers[stone], board_size)
+    elif corner_method != "kaya":
+        raise ValueError(f"unknown corner method {corner_method!r}")
     cells = np.vectorize(_CELL_OF_CLASS.get)(dets.classes[stone]) if stone.any() else np.zeros(0, dtype=int)
     grid = snap_to_grid(dets.centers[stone], cells, dets.scores[stone], corners, board_size)
     return BoardResult(grid=grid, corners=corners, corners_detected=True, n_corner_candidates=n_candidates)

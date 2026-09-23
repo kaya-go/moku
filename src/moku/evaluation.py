@@ -28,7 +28,7 @@ symmetry), or the ``source_dataset`` itself when it names a group such as
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -239,6 +239,7 @@ def board_table(
     preds: list[RawPrediction],
     targets: list[Target],
     threshold: float = KAYA_STONE_THRESHOLD,
+    corner_method: str = "kaya",
 ) -> pd.DataFrame:
     """One row per image with a full ground-truth board (4 corners): Kaya pipeline vs truth."""
     rows = []
@@ -246,7 +247,9 @@ def board_table(
         truth = truth_board(target.bboxes, target.categories)
         if truth is None:
             continue
-        result = reconstruct_board(pred.logits, pred.boxes, pred.width, pred.height, truth.board_size, threshold)
+        result = reconstruct_board(
+            pred.logits, pred.boxes, pred.width, pred.height, truth.board_size, threshold, corner_method
+        )
         rows.append(
             {
                 "index": i,
@@ -324,6 +327,13 @@ class EvalResult:
     boards: pd.DataFrame
     predictions: list[RawPrediction] = field(repr=False)
     targets: list[Target] = field(repr=False)
+    corner_method: str = "kaya"
+
+    def with_corner_method(self, method: str, threshold: float = KAYA_STONE_THRESHOLD) -> EvalResult:
+        """The same predictions read with another corner selection (see ``reconstruct_board``)."""
+        boards = board_table(self.predictions, self.targets, threshold, method)
+        name = f"{self.model} [{method}]"
+        return replace(self, model=name, board=board_summary(boards), boards=boards, corner_method=method)
 
 
 def logit(p: float) -> float:
@@ -380,7 +390,10 @@ def threshold_sweep(result: EvalResult, thresholds=SWEEP_THRESHOLDS) -> pd.DataF
     rows = []
     for t in thresholds:
         offset = stone_offset(t)
-        s = board_summary(board_table(shift_logits(result.predictions, offset), result.targets), with_ci=False)
+        boards = board_table(
+            shift_logits(result.predictions, offset), result.targets, corner_method=result.corner_method
+        )
+        s = board_summary(boards, with_ci=False)
         rows.append({"threshold": t, "offset": offset, **s})
     return pd.DataFrame(rows)
 

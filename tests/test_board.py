@@ -121,3 +121,23 @@ def test_refine_corners_moves_a_misplaced_corner_back():
     fixed, shift = result
     np.testing.assert_allclose(fixed[corner_idx[0]], bboxes[corner_idx[0]], atol=0.5)
     assert 0.1 < shift < 0.6
+
+
+def test_stone_fit_rejects_a_confident_false_corner():
+    grid, bboxes, cats = _scene(19, seed=3)
+    # A false corner out-scores the true BL corner: Kaya keeps it and breaks the board.
+    logits, boxes = _perfect_outputs(bboxes + [[300 - 8, 250 - 8, 16, 16]], cats + [CORNER])
+    logits[len(bboxes), CORNER] = 6.0
+    kaya = reconstruct_board(logits, boxes, WIDTH, HEIGHT, 19)
+    fit = reconstruct_board(logits, boxes, WIDTH, HEIGHT, 19, corner_method="fit")
+    assert compare_boards(kaya.grid, grid)["errors"] > 0
+    assert compare_boards(fit.grid, grid)["errors"] == 0
+    np.testing.assert_allclose(fit.corners, CORNERS, atol=1.0)
+
+
+def test_stone_fit_keeps_correct_corners():
+    grid, bboxes, cats = _scene(13, seed=4)
+    logits, boxes = _perfect_outputs(bboxes, cats)
+    fit = reconstruct_board(logits, boxes, WIDTH, HEIGHT, 13, corner_method="fit")
+    assert compare_boards(fit.grid, grid)["errors"] == 0
+    np.testing.assert_allclose(fit.corners, CORNERS, atol=1.0)
