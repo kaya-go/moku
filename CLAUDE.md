@@ -16,6 +16,9 @@ printed as tables or saved as files (PNG, JSON).
 - **Datasets**: `kaya-go/moku-v1`, `kaya-go/moku-v2`, `kaya-go/moku-v3` on Hugging Face Hub.
 - **Model in production**: `kaya-go/moku-v3` (fine-tuned RT-DETR r18vd, W&B run
   `r10_os3_lr3e-4_cosmin100`). Kaya downloads `kaya-go/moku-v3/resolve/main/model.onnx`.
+- **moku-v4 candidate** (private, not in Kaya yet): `kaya-go/moku-v4` = moku-v2 frozen + corner head
+  (run `f2-v2-frozen-head128`), ONNX exported with `--logit-offset 0.35`; extra output
+  `corner_points` `(batch, 8, 3)`. See `specs/004-corners.md`.
 - **Kaya repo**: usually checked out at `../kaya`; board recognition lives in
   `packages/board-recognition/src/moku-*.ts`.
 

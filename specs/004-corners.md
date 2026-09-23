@@ -68,8 +68,11 @@ only filters false corners outside the board, and it changes Kaya's 3-class cont
   (Kaya's selection on the head points) and `head+fit`. Checkpoints still selected on Kaya's pipeline.
 - [x] H1 (`h1-rtdetr-real-rf-head-s0`): B2 + corner head, 72 epochs.
 - [x] F1 (`f1-v2-frozen-head`): corner head alone on frozen moku-v2 (`--freeze-detector`), 24 epochs.
-- [ ] G1 (`g1-v2-ft-head`): F1 fine-tuned end to end (lr 2e-5, 20 epochs, selected on `head`).
-- [ ] F2 (`f2-v2-frozen-head128`): F1 with a 128-channel head, 100 epochs.
+- [x] G1 (`g1-v2-ft-head`): F1 fine-tuned end to end (lr 2e-5, 20 epochs, selected on `head`).
+- [x] F2 (`f2-v2-frozen-head128`): F1 with a 128-channel head, 100 epochs.
+- [x] Stone threshold calibrated on validation with the head's corners (`moku calibrate --corners head`):
+  0.035 → 0.025 (offset +0.35); ONNX exported with it, verified, published privately as `kaya-go/moku-v4`.
+- [ ] Port to Kaya: read `corner_points`, run Kaya's corner selection on those points, switch to moku-v4.
 
 ## Results
 
@@ -90,6 +93,20 @@ than half a cell off. v4 labels with corrected corners. `best` = checkpoint sele
 | H1 best (ep 12) | head | 42% (+13 [+3, +22]) | 41% (+11 [+2, +19]) | 24% (−4 [−16, +9]) | 23 / 28 / 16% |
 | F1 (v2 frozen + head) | head | 34% (+5 [+2, +11]) | 34% (+4 [0, +8]) | 37% (+9 [+3, +15]) | 29 / 30 / 33% |
 | F1 | head+fit | 34% (+5) | 38% (+8 [+3, +14]) | 34% (+6) | 25 / 22 / 27% |
+| G1 (F1 fine-tuned) | head | 40% (+12) | 34% (+4 [−5, +14]) | 38% (+11 [+5, +17]) | 29 / 27 / 24% |
+| F2 (v2 frozen + head 128) | head | 34% (+5 [+2, +11]) | 36% (+6 [+1, +12]) | 38% (+11 [+5, +18]) | 24 / 25 / 23% |
+| **moku-v4** = F2, threshold 0.025, ONNX | head | 42% | 44% [35, 53] | 47% [37, 58] | 23 / 26 / 20% |
+
+`head+fit` above is the first version (selection among the head's quads); selection is now skipped
+for the head (it broke 18 correct quads on H1's test and fixed 1), which leaves head+fit ≈ head.
+moku-v4's validation number is optimistic (the offset is fitted on it); test and Gomrade are held out.
+F2 is chosen over H1 (better on v4 test, 41%, but 24% on Gomrade: its stones do not generalize)
+and G1 (no better than F2, and it moves v2's stones): v2's stones are untouched, so no stone
+regression is possible. ONNX latency (1 thread, desktop CPU) 705 ms vs 649 ms for v2 (+9%), 82.6 MB.
+
+Where the remaining boards are lost (F2, head corners, test / Gomrade): corners ≈ 30%; the threshold
+≈ 14 points (a per-image oracle threshold reaches 48% / 53%; a per-image Otsu threshold on log scores
+gave +4 on v4 but −5 on Gomrade, not kept); stones missed or misclassified at any threshold ≈ 22%.
 
 - Data lever: removing the generated images and adding Roboflow (B0 → B1 → B2) helps on
   validation, but B2's 33% is selection bias: 19% on test, and every run from the PekingU base
