@@ -1,18 +1,18 @@
 # /// script
 # requires-python = ">=3.12,<4"
 # dependencies = [
-#     "torch>=2.9.1",
-#     "torchvision>=0.25.0,<0.26",
-#     "transformers>=5.2.0",
-#     "datasets>=4.8.3",
-#     "accelerate>=1.12.0,<2",
-#     "wandb>=0.25.1",
+#     "torch>=2.13.0",
+#     "torchvision>=0.28.0,<0.29",
+#     "transformers>=5.16.1,<6",
+#     "datasets>=5.0.1,<6",
+#     "accelerate>=1.15.0,<2",
+#     "wandb>=0.30.0,<0.31",
 #     "pycocotools>=2.0.11,<3",
-#     "torchmetrics>=1.8.2,<2",
-#     "faster-coco-eval>=1.7.2,<2",
-#     "huggingface_hub>=1.5.0",
-#     "albumentations>=1.4.20,<3",
-#     "numpy>=2.4.2,<3",
+#     "torchmetrics>=1.9.0,<2",
+#     "faster-coco-eval>=1.8.0,<2",
+#     "huggingface_hub>=1.32.0,<2",
+#     "albumentations>=2.0.8,<3",
+#     "numpy>=2.5.3,<3",
 # ]
 # ///
 """Fine-tune RT-DETR r18vd on kaya-go/moku dataset.
@@ -505,11 +505,10 @@ def _build_train_augmentation() -> A.Compose:
                 ],
                 p=0.4,
             ),
-            A.GaussNoise(var_limit=(26.0, 416.0), p=0.3),
+            A.GaussNoise(std_range=(0.02, 0.08), p=0.3),  # sigma 5-20 on a 0-255 scale
             # ── Shadows & occlusion (real lighting) ──
             A.RandomShadow(
-                num_shadows_lower=1,
-                num_shadows_upper=3,
+                num_shadows_limit=(1, 3),
                 shadow_dimension=5,
                 shadow_roi=(0, 0, 1, 1),
                 p=0.3,
@@ -878,11 +877,14 @@ def main():
         weight_decay=args.weight_decay,
         lr_scheduler_type=args.lr_scheduler,
         lr_scheduler_kwargs=lr_scheduler_kwargs,
-        warmup_ratio=args.warmup_ratio,
+        warmup_steps=args.warmup_ratio,  # a float in [0, 1) is a ratio of total steps
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=3,
-        load_best_model_at_end=True,
+        # transformers 5.x saves legacy key names (e.g. `fc1`) that Trainer's best-model reload
+        # (a raw `load_state_dict`) silently skips; the best checkpoint is reloaded with
+        # `from_pretrained` instead (see the final push below).
+        load_best_model_at_end=False,
         metric_for_best_model="eval_map_50",
         greater_is_better=True,
         logging_steps=10,
@@ -958,8 +960,9 @@ def main():
 
     # --- Final push to Hub (best model) ---
     if args.push_to_hub:
-        print(f"Pushing best model to {HF_MODEL} (revision={hub_revision})...")
-        trainer.model.push_to_hub(HF_MODEL, revision=hub_revision)
+        best = trainer.state.best_model_checkpoint
+        print(f"Pushing best model ({best}) to {HF_MODEL} (revision={hub_revision})...")
+        RTDetrForObjectDetection.from_pretrained(best).push_to_hub(HF_MODEL, revision=hub_revision)
         image_processor.push_to_hub(HF_MODEL, revision=hub_revision)
         print(f"Model pushed to https://huggingface.co/{HF_MODEL} (branch: {hub_revision})")
 
