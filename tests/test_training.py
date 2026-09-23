@@ -52,6 +52,15 @@ def test_ema_follows_then_averages():
     assert ema.current_decay() == 0.0
 
 
+def test_ema_of_a_frozen_model_with_tied_weights_is_the_model():
+    model = torch.nn.Sequential(torch.nn.Linear(3, 3), torch.nn.Linear(3, 3))
+    model[1].weight = model[0].weight  # tied, listed twice in the state_dict
+    ema = ModelEMA(model, decay=0.999, tau=10.0)
+    for _ in range(100):
+        ema.update(model)
+    assert torch.allclose(ema.module[0].weight, model[0].weight)
+
+
 def test_targets_are_normalized_cxcywh():
     boxes, cats = clip_boxes([[-5, 10, 20, 20], [630, 630, 20, 20], [100, 100, 0, 5]], [0, 1, 2], 640, 640)
     assert cats == [0, 1]  # the zero-width box is dropped

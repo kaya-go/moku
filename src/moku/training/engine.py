@@ -132,7 +132,13 @@ class ModelEMA:
     def update(self, model: torch.nn.Module) -> None:
         if self._pairs is None:  # state_dict tensors share storage with the modules: resolve them once
             ema_state, state = self.module.state_dict(), model.state_dict()
-            names = [n for n, v in ema_state.items() if v.dtype.is_floating_point]
+            # Tied weights (D-FINE ties its class/box heads) appear under several names: update each
+            # storage once, or the average is applied twice per step and drifts away from the model.
+            seen, names = set(), []
+            for name, value in ema_state.items():
+                if value.dtype.is_floating_point and value.data_ptr() not in seen:
+                    seen.add(value.data_ptr())
+                    names.append(name)
             self._pairs = ([ema_state[n] for n in names], [state[n] for n in names])
         self.updates += 1
         d = self.current_decay()
