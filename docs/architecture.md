@@ -44,10 +44,10 @@ Source datasets annotate empty intersections (`empty`, `empty_edge`, `empty_corn
 The model must handle photos where only part of the goban is visible (e.g., 1, 2, or 3 corners showing). This is common in real-world usage (close-up shots, angled photos):
 
 - Only the visible corners and stones are annotated.
-- `src/moku/grid.py` handles 1–4 visible corners via the homography solver.
+- Kaya completes 2–3 visible corners geometrically (square / parallelogram) before the homography.
 - Dataset v2 should explicitly include partial board images to improve robustness.
 
-### SGF Conversion (downstream, not in this repo)
+### SGF Conversion (downstream, in Kaya)
 
 After detection, the Kaya app will:
 
@@ -107,10 +107,23 @@ v3 switches to **single-stage training** from COCO pretrained weights directly o
 
 ## ONNX Export
 
-- Export via `torch.onnx.export` with dynamic axes for batch dimension.
-- Target ONNX opset 16+.
-- Verify with `onnxruntime` before publishing.
-- Published to `kaya-go/moku-v1` on Hugging Face Hub.
+- `moku export` (`src/moku/export.py`): `torch.onnx.export`, opset 18, dynamic batch axis.
+- Verified against PyTorch with `onnxruntime` (queries matched by nearest box) before publishing.
+- Published as `model.onnx` next to the weights (`kaya-go/moku-v3`), which Kaya downloads.
+- I/O contract: `pixel_values` (RGB in [0, 1], 640×640, no normalization) → `logits` (300×3), `pred_boxes` (300×4 cxcywh).
+
+## Evaluation
+
+`moku eval` (`src/moku/evaluation.py`) scores a model twice:
+
+- **Detection metrics** (diagnostics): COCO mAP@50, stone center-distance AP, top-4 corner recall.
+- **Board metrics** (decision metric): `src/moku/board.py` is a line-by-line port of Kaya's
+  post-processing (`moku-postprocess.ts`, `corners.ts`). It rebuilds the position from raw model
+  outputs and compares it with the position read from the annotations (same geometry), giving the
+  share of perfect boards, wrong intersections per board and corner failures. Validation and test
+  splits hold ~50 images from ~30 distinct photos, so every number comes with a bootstrap CI
+  resampled over photos (augmented copies of one photo share a cluster), and models are compared
+  with paired differences.
 
 ## Dataset: kaya-go/moku-v1 → v2
 
@@ -159,12 +172,13 @@ RT-DETR r34vd (ResNet-34 backbone) doubles parameter count with the same ONNX ex
 
 ### `scripts/train.py`
 
-Self-contained training script for HF Jobs. Supports two-stage training (synthetic pre-train, real fine-tune). See inline docstring for usage.
+Self-contained (PEP 723) training script for HF Jobs: single-stage (v3) or two-stage (v2) training,
+per-epoch validation metrics, best checkpoint saved as a W&B artifact. See inline docstring for usage.
 
-### `scripts/launch_grid.sh`
+### `scripts/launch_grid_r10.sh`
 
-Shell launcher for HF Jobs. Launches stage 1 and/or stage 2 LR sweep jobs.
+Round 10 launcher — the recipe that produced moku-v3. Earlier rounds are in the git history.
 
-### `scripts/launch_grid_r4.sh`
+### `scripts/analyze_runs.py`
 
-Round 4 hyperparameter search launcher (10 runs in 4 groups). Supports launching all runs or a specific group.
+W&B run analysis for a round (EMA smoothing, plateau detection).

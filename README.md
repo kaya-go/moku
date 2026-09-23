@@ -1,50 +1,59 @@
 # Moku
 
-Object detection model for converting goban (Go board) photos and screenshots to SGF files. Moku detects stones and board geometry in goban images, enabling automatic game transcription. The exported ONNX model powers the [Kaya](https://github.com/kaya-go/kaya) web app, running directly in the browser via ONNX Runtime WebAssembly.
+Object detector that turns photos of a Go board (goban) into a position. Moku detects black
+stones, white stones and the four board corners; the [Kaya](https://github.com/kaya-go/kaya) app
+runs the exported ONNX model in the browser (ONNX Runtime Web), maps the stones onto the grid
+through the corners' homography and produces an SGF.
 
-| Resource      | Link                                                                       |
-| ------------- | -------------------------------------------------------------------------- |
-| Trained Model | [kaya-go/moku-v1](https://huggingface.co/kaya-go/moku-v1)                  |
-| Dataset       | [kaya-go/moku-v1](https://huggingface.co/datasets/kaya-go/moku-v1)         |
-| ONNX Model    | [kaya-go/moku-v1](https://huggingface.co/kaya-go/moku-v1) (`model.onnx`) |
+| Resource    | Link                                                                         |
+| ----------- | ---------------------------------------------------------------------------- |
+| Model       | [kaya-go/moku-v3](https://huggingface.co/kaya-go/moku-v3) (`model.onnx` for Kaya) |
+| Dataset     | [kaya-go/moku-v3](https://huggingface.co/datasets/kaya-go/moku-v3)           |
 
 ## Pipeline
 
-```bash
-Photo → Object Detection (ONNX) → Stone Positions → Grid Mapping → SGF
+```
+Photo → detector (ONNX, 640×640) → stones + corners → homography → grid → SGF
 ```
 
-## Dataset
+| ID  | Category       | Description                                |
+| --- | -------------- | ------------------------------------------ |
+| 0   | `black_stone`  | Individual black stone                     |
+| 1   | `white_stone`  | Individual white stone                     |
+| 2   | `board_corner` | Outermost grid intersection at each corner |
 
-The [`kaya-go/moku-v1`](https://huggingface.co/datasets/kaya-go/moku-v1) dataset is a harmonized object detection dataset combining two COCO-format sources from Roboflow (~492 images total). It detects 3 categories:
+The model is a fine-tuned [RT-DETR](https://arxiv.org/abs/2304.08069) (ResNet-18vd backbone,
+from [`PekingU/rtdetr_r18vd`](https://huggingface.co/PekingU/rtdetr_r18vd)): no NMS, so the ONNX
+graph is plain and Kaya only needs a sigmoid, a threshold and some geometry.
 
-| ID  | Category      | Description                |
-| --- | ------------- | -------------------------- |
-| 0   | `board`       | Full Go board bounding box |
-| 1   | `black_stone` | Individual black stone     |
-| 2   | `white_stone` | Individual white stone     |
-
-Empty intersections are not detected — they are inferred from board geometry and stone positions during SGF conversion. Images are re-split into train/validation/test sets with base-image grouping to avoid data leakage from Roboflow augmentations.
-
-## Model
-
-The model is a fine-tuned [RT-DETR](https://arxiv.org/abs/2304.08069) with a ResNet-18vd backbone, starting from the COCO-pretrained [`PekingU/rtdetr_r18vd`](https://huggingface.co/PekingU/rtdetr_r18vd) checkpoint. RT-DETR was chosen because:
-
-- **No NMS**: the transformer decoder eliminates duplicates internally, producing clean ONNX graphs.
-- **Small**: ResNet-18vd backbone (~20MB) is lightweight enough for browser inference.
-- **HF native**: first-class support in the `transformers` library with no vendor dependencies.
-
-Fine-tuning is done with the HF `Trainer` API on the harmonized dataset. The trained model is published to [`kaya-go/moku-v1`](https://huggingface.co/kaya-go/moku-v1) on Hugging Face Hub.
-
-## ONNX Export
-
-The trained model is exported to ONNX via `torch.onnx.export` (opset 16+, dynamic batch axis) and verified with `onnxruntime`. The ONNX file is available in the [`kaya-go/moku-v1`](https://huggingface.co/kaya-go/moku-v1) model repository as `model.onnx`.
-
-## Installation
+## Usage
 
 ```bash
 pixi install
+
+# Compare models end to end (detection metrics + positions rebuilt with Kaya's post-processing)
+pixi run moku eval kaya-go/moku-v2 kaya-go/moku-v3 --split validation --split test --sweep
+
+# Export for Kaya, check ONNX Runtime against PyTorch, measure single-thread latency
+pixi run moku export kaya-go/moku-v3 --output artifacts/model.onnx
+
+# Datasets and annotation
+pixi run moku dataset stats
+pixi run moku dataset audit            # annotations whose corners do not fit their stones
+pixi run moku annotate prepare && pixi run moku annotate serve
+
+pixi run test
 ```
+
+Training runs on Hugging Face Jobs with the self-contained [`scripts/train.py`](scripts/train.py)
+(see its docstring and [`scripts/launch_grid_r10.sh`](scripts/launch_grid_r10.sh), the recipe of
+the production model).
+
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md) — design decisions
+- [docs/dataset.md](docs/dataset.md) — dataset sources, harmonization and splits
+- [docs/progress.md](docs/progress.md) — results and next steps
 
 ## License
 
