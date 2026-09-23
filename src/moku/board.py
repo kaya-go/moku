@@ -109,6 +109,31 @@ def compute_homography(src: np.ndarray, dst: np.ndarray) -> np.ndarray | None:
     return np.append(h, 1.0).reshape(3, 3)
 
 
+def fit_homography(src: np.ndarray, dst: np.ndarray) -> np.ndarray | None:
+    """Least-squares homography from N ≥ 4 point pairs (normalized DLT). Not part of Kaya's pipeline."""
+    src, dst = np.asarray(src, dtype=np.float64), np.asarray(dst, dtype=np.float64)
+    if len(src) < 4:
+        return None
+
+    def normalizer(points: np.ndarray) -> np.ndarray:
+        mean = points.mean(axis=0)
+        scale = np.sqrt(2) / max(np.mean(np.hypot(*(points - mean).T)), 1e-12)
+        return np.array([[scale, 0, -scale * mean[0]], [0, scale, -scale * mean[1]], [0, 0, 1]])
+
+    ts, td = normalizer(src), normalizer(dst)
+    s = apply_homography(ts, src)
+    d = apply_homography(td, dst)
+    rows = []
+    for (x, y), (u, v) in zip(s, d):
+        rows.append([-x, -y, -1, 0, 0, 0, u * x, u * y, u])
+        rows.append([0, 0, 0, -x, -y, -1, v * x, v * y, v])
+    _, sing, vt = np.linalg.svd(np.asarray(rows))
+    if sing[-2] < 1e-12:
+        return None
+    h = np.linalg.inv(td) @ vt[-1].reshape(3, 3) @ ts
+    return h / h[2, 2]
+
+
 def apply_homography(h: np.ndarray, points: np.ndarray) -> np.ndarray:
     points = np.asarray(points, dtype=np.float64).reshape(-1, 2)
     homogeneous = np.hstack([points, np.ones((len(points), 1))]) @ h.T

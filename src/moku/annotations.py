@@ -12,11 +12,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from datasets import Dataset, DatasetDict
 from datasets import Image as HFImage
 
-from moku.board import truth_board
+from moku.board import _UNIT_SQUARE, apply_homography, compute_homography, fit_homography, truth_board
 from moku.dataset import CATEGORIES
 
 
@@ -272,6 +273,53 @@ def load_annotated_generated(
 # ---------------------------------------------------------------------------
 # Board-level consistency of the ground truth
 # ---------------------------------------------------------------------------
+
+
+def refine_corners(
+    bboxes, categories, min_stones: int = 8, max_shift_cells: float = 1.0, iterations: int = 3
+) -> tuple[list[list[float]], float] | None:
+    """Move the 4 annotated corners onto the grid defined by the annotated stones.
+
+    Stones are snapped to intersections with the annotated corners, a least-squares homography
+    is fitted from the stones to their intersections (repeated a few times), and the corners are
+    re-projected from it. Returns ``(bboxes with moved corner boxes, largest shift in cells)``, or
+    ``None`` when the stones cannot be trusted to define the grid (too few, too clustered, off the
+    grid, colliding) or when the fit does not improve the snapping residual.
+    """
+    truth = truth_board(bboxes, categories)
+    cats = np.asarray(categories)
+    boxes = np.asarray(bboxes, dtype=np.float64).reshape(-1, 4)
+    if truth is None or (cats != CATEGORIES["board_corner"]).sum() < min_stones:
+        return None
+    n = truth.board_size
+    stones = boxes[cats != CATEGORIES["board_corner"], :2] + boxes[cats != CATEGORIES["board_corner"], 2:] / 2
+    h = compute_homography(truth.corners, _UNIT_SQUARE)
+    residual_before = truth.snap_residual
+    for _ in range(iterations):
+        grid = apply_homography(h, stones) * (n - 1)
+        lattice = np.round(grid)
+        if (lattice < 0).any() or (lattice > n - 1).any() or len(np.unique(lattice, axis=0)) < len(lattice):
+            return None
+        span = lattice.max(axis=0) - lattice.min(axis=0)
+        if (span < (n - 1) / 2).any():  # too little of the board to extrapolate the corners
+            return None
+        h = fit_homography(stones, lattice / (n - 1))
+        if h is None:
+            return None
+    grid = apply_homography(h, stones) * (n - 1)
+    residual_after = float(np.median(np.hypot(*(grid - np.round(grid)).T)))
+    to_image = np.linalg.inv(h)
+    corners = apply_homography(to_image, _UNIT_SQUARE)
+    cell = np.mean([np.hypot(*(truth.corners[i] - truth.corners[(i + 1) % 4])) for i in range(4)]) / (n - 1)
+    shift = float(np.hypot(*(corners - truth.corners).T).max() / cell)
+    if residual_after >= residual_before or shift > max_shift_cells:
+        return None
+    out = boxes.copy()
+    for i in np.where(cats == CATEGORIES["board_corner"])[0]:
+        center = out[i, :2] + out[i, 2:] / 2
+        nearest = corners[np.hypot(*(corners - center).T).argmin()]
+        out[i, :2] = nearest - out[i, 2:] / 2
+    return out.tolist(), shift
 
 
 def audit_boards(dataset: DatasetDict, max_residual: float = 0.3) -> pd.DataFrame:

@@ -97,3 +97,27 @@ def test_order_corners_and_js_round():
     shuffled = CORNERS[[2, 0, 3, 1]]
     np.testing.assert_array_equal(order_corners(shuffled), CORNERS)
     np.testing.assert_array_equal(js_round(np.array([0.5, 1.5, -0.5, 2.49])), [1, 2, 0, 2])
+
+
+def test_fit_homography_recovers_exact_mapping():
+    from moku.board import fit_homography
+
+    unit = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    h = compute_homography(CORNERS, unit)
+    points = np.random.default_rng(0).uniform(100, 500, size=(30, 2))
+    fitted = fit_homography(points, apply_homography(h, points))
+    np.testing.assert_allclose(apply_homography(fitted, CORNERS), unit, atol=1e-6)
+
+
+def test_refine_corners_moves_a_misplaced_corner_back():
+    from moku.annotations import refine_corners
+
+    grid, bboxes, cats = _scene(19, seed=3)
+    moved = [list(b) for b in bboxes]
+    corner_idx = [i for i, c in enumerate(cats) if c == CORNER]
+    moved[corner_idx[0]][0] += 8  # ~0.3 cell off
+    result = refine_corners(moved, cats)
+    assert result is not None
+    fixed, shift = result
+    np.testing.assert_allclose(fixed[corner_idx[0]], bboxes[corner_idx[0]], atol=0.5)
+    assert 0.1 < shift < 0.6
