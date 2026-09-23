@@ -69,6 +69,7 @@ class TrainConfig:
     max_hours: float | None = None  # stop cleanly (and save) past this budget
     limit_train: int | None = None  # smoke tests: truncate the training set
     limit_eval: int | None = None
+    profile_steps: int = 0  # > 0: profile that many steps after a warm-up, print the top ops and stop
     device: str | None = None
 
     @property
@@ -402,6 +403,9 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
                     f"{record['img_per_s']:.0f} img/s (data wait {record['data_wait']:.0%})"
                 )
                 running = {}
+            if cfg.profile_steps and it == 20:
+                _profile(model, optimizer, ema, loader, device, amp, cfg.profile_steps)
+                return {}
             t0 = time.time()
 
         elapsed_h = (time.time() - start) / 3600
@@ -446,6 +450,29 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
     run.write_json("summary.json", summary)
     print(f"Done in {summary['hours']:.2f} h. Best epoch {best['epoch']}: {best['metrics']}")
     return summary
+
+
+def _profile(model, optimizer, ema, loader, device: str, amp: bool, steps: int) -> None:
+    """Time ``steps`` training steps with ``torch.profiler`` and print the most expensive ops."""
+    from torch.profiler import ProfilerActivity, profile
+
+    activities = [ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device == "cuda" else [])
+    batches = iter(loader)
+    with profile(activities=activities) as prof:
+        for _ in range(steps):
+            images, labels = next(batches)
+            images = images.to(device)
+            labels = [{k: v.to(device) for k, v in lab.items()} for lab in labels]
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp):
+                loss = model(pixel_values=images, labels=labels).loss
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
+            ema.update(model)
+        if device == "cuda":
+            torch.cuda.synchronize()
+    for key in ("self_cpu_time_total", "self_cuda_time_total") if device == "cuda" else ("self_cpu_time_total",):
+        print(prof.key_averages().table(sort_by=key, row_limit=15, max_name_column_width=60))
 
 
 def _group_index(optimizer, name: str) -> int:
