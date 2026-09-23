@@ -281,6 +281,9 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
     from datasets import load_dataset
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
 
+    from moku.training.matcher import install as install_blockwise_matcher
+
+    install_blockwise_matcher()
     start = time.time()
     run = RunDir(Path(cfg.output_dir) / cfg.run_name)
     seed_everything(cfg.seed)

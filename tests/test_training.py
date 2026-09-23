@@ -66,3 +66,19 @@ def test_train_indices_oversample_real():
     assert sorted(train_indices(split, 3)) == [0, 0, 0, 1, 2, 2, 2, 3]
     assert train_indices(split, 1, "generated") == [1, 3]
     assert train_indices(split, 2, exclude=("go_chess",)) == [2, 2, 1, 3]
+
+
+def test_blockwise_matcher_matches_transformers():
+    from transformers import RTDetrConfig
+    from transformers.loss.loss_rt_detr import RTDetrHungarianMatcher
+
+    from moku.training.matcher import blockwise_forward
+
+    torch.manual_seed(0)
+    matcher = RTDetrHungarianMatcher(RTDetrConfig(num_labels=3))
+    outputs = {"logits": torch.randn(3, 50, 3), "pred_boxes": torch.rand(3, 50, 4) * 0.5 + 0.1}
+    targets = [{"class_labels": torch.randint(0, 3, (n,)), "boxes": torch.rand(n, 4) * 0.5 + 0.1} for n in (7, 0, 20)]
+    expected = matcher(outputs, targets)
+    got = blockwise_forward(matcher, outputs, targets)
+    for (ei, ej), (gi, gj) in zip(expected, got):
+        assert torch.equal(ei, gi) and torch.equal(ej, gj)
