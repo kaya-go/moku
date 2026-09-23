@@ -37,7 +37,12 @@ MODELS = {
     "rtdetr-r18": "PekingU/rtdetr_r18vd",
     "dfine-s": "ustc-community/dfine-small-obj2coco",
     "dfine-n": "ustc-community/dfine-nano-coco",
+    # DEIMv2 (transformers conversions of Intellindust/DEIMv2_*): MAL loss, dense one-to-one matching.
+    "deimv2-s": "harshaljanjani/DEIMv2_DINOv3_S_COCO_Transformers",  # expects ImageNet-normalized pixels
+    "deimv2-n": "harshaljanjani/DEIMv2_HGNetv2_N_COCO_Transformers",
 }
+
+BACKBONE_PREFIXES = (".backbone.", ".conv_encoder.model.")  # DEIMv2-N names its HGNetv2 conv_encoder
 
 
 @dataclass
@@ -88,7 +93,7 @@ def param_groups(model: torch.nn.Module, lr: float, backbone_lr_mult: float, wei
     groups = {(bb, decay): [] for bb in (True, False) for decay in (True, False)}
     for name, param in model.named_parameters():
         if param.requires_grad:
-            groups[(".backbone." in name, param.ndim > 1)].append(param)
+            groups[(any(k in name for k in BACKBONE_PREFIXES), param.ndim > 1)].append(param)
     return [
         {
             "params": params,
@@ -331,6 +336,14 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
         optimizer, lambda it: lr_factor(it, total_iters, cfg.warmup_iters, cfg.flat_fraction, cfg.min_lr_ratio)
     )
     amp = cfg.amp and device == "cuda"
+    # Training pixels are in [0, 1] like Kaya's; models trained on normalized pixels get it here
+    # (and inside the ONNX graph at export).
+    normalize = None
+    if getattr(processor, "do_normalize", False):
+        normalize = (
+            torch.tensor(processor.image_mean, device=device).view(1, 3, 1, 1),
+            torch.tensor(processor.image_std, device=device).view(1, 3, 1, 1),
+        )
 
     run.write_json(
         "config.json",
@@ -371,6 +384,8 @@ def train(cfg: TrainConfig, extra_config: dict | None = None) -> dict:
         for images, labels in loader:
             t_data += time.time() - t0
             images = images.to(device, non_blocking=True)
+            if normalize is not None:
+                images = (images - normalize[0]) / normalize[1]
             labels = [{k: v.to(device, non_blocking=True) for k, v in lab.items()} for lab in labels]
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=amp):
                 out = model(pixel_values=images, labels=labels)

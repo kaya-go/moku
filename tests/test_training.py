@@ -34,6 +34,12 @@ def test_param_groups_split_backbone_and_decay():
     assert sum(len(g["params"]) for g in groups.values()) == len(list(model.parameters()))
     assert all(p.ndim > 1 for p in groups["head"]["params"])
 
+    other = torch.nn.Module()
+    other.model = torch.nn.Module()
+    other.model.conv_encoder = torch.nn.Module()
+    other.model.conv_encoder.model = torch.nn.Linear(2, 2)  # DEIMv2-N's backbone naming
+    assert {g["name"] for g in param_groups(other, 1e-4, 0.5, 1e-4)} == {"backbone", "backbone_no_decay"}
+
 
 def test_ema_follows_then_averages():
     model = torch.nn.Linear(2, 1)

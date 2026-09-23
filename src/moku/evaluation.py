@@ -326,16 +326,40 @@ class EvalResult:
     targets: list[Target] = field(repr=False)
 
 
+def logit(p: float) -> float:
+    return float(np.log(p / (1 - p)))
+
+
+def stone_offset(threshold: float) -> float:
+    """Logit offset under which Kaya's fixed 0.035 threshold acts as ``threshold`` on the raw scores.
+
+    Added to *every* class logit (a per-class offset could change Kaya's argmax), it can be baked
+    into the ONNX (``moku export --logit-offset``) so that Kaya needs no per-model setting. The
+    corner score floor (0.005) moves with it; corner ranking does not change.
+    """
+    return logit(KAYA_STONE_THRESHOLD) - logit(threshold)
+
+
+def shift_logits(preds: list[RawPrediction], offset: float) -> list[RawPrediction]:
+    if not offset:
+        return preds
+    return [RawPrediction(p.logits + offset, p.boxes, p.width, p.height) for p in preds]
+
+
 def evaluate(
     detector: Detector,
     dataset_split,
     split: str = "test",
     threshold: float = KAYA_STONE_THRESHOLD,
     batch_size: int = 8,
+    logit_offset: float = 0.0,
 ) -> EvalResult:
-    """Run ``detector`` on a dataset split and compute detection + board metrics."""
+    """Run ``detector`` on a dataset split and compute detection + board metrics.
+
+    ``logit_offset`` evaluates the model as if exported with that offset baked in.
+    """
     targets = [Target.from_example(ex) for ex in dataset_split.remove_columns("image")]
-    preds = run_detector(detector, (ex["image"] for ex in dataset_split), batch_size=batch_size)
+    preds = shift_logits(run_detector(detector, (ex["image"] for ex in dataset_split), batch_size), logit_offset)
     boards = board_table(preds, targets, threshold)
     return EvalResult(
         model=detector.name,
@@ -348,10 +372,21 @@ def evaluate(
     )
 
 
-def threshold_sweep(result: EvalResult, thresholds: list[float]) -> pd.DataFrame:
-    """Board metrics of already-computed predictions at several stone thresholds."""
+SWEEP_THRESHOLDS = (0.005, 0.01, 0.015, 0.02, 0.025, 0.035, 0.05, 0.07, 0.1, 0.15, 0.2, 0.3, 0.5)
+
+
+def threshold_sweep(result: EvalResult, thresholds=SWEEP_THRESHOLDS) -> pd.DataFrame:
+    """Board metrics at several equivalent stone thresholds, applied as logit offsets (as shipped)."""
     rows = []
     for t in thresholds:
-        s = board_summary(board_table(result.predictions, result.targets, t), with_ci=False)
-        rows.append({"threshold": t, **s})
+        offset = stone_offset(t)
+        s = board_summary(board_table(shift_logits(result.predictions, offset), result.targets), with_ci=False)
+        rows.append({"threshold": t, "offset": offset, **s})
     return pd.DataFrame(rows)
+
+
+def best_offset(result: EvalResult, thresholds=SWEEP_THRESHOLDS) -> dict[str, float]:
+    """Calibration fitted on ``result`` (validation): most perfect boards, then fewest errors."""
+    sweep = threshold_sweep(result, thresholds)
+    best = sweep.sort_values(["perfect", "errors"], ascending=[False, True]).iloc[0]
+    return {"threshold": float(best["threshold"]), "offset": float(best["offset"])}

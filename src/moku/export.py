@@ -23,33 +23,45 @@ OPSET = 18
 
 
 class _OnnxWrapper(torch.nn.Module):
-    """Strip the HF output dataclass down to the ``(logits, pred_boxes)`` tuple."""
+    """Kaya's contract around a HF detector: [0, 1] pixels in, ``(logits, pred_boxes)`` out.
 
-    def __init__(self, model: torch.nn.Module):
+    Models that expect mean/std-normalized pixels get the normalization inside the graph, and
+    ``logit_offset`` (see ``moku.evaluation.stone_offset``) is added to every class logit.
+    """
+
+    def __init__(self, model: torch.nn.Module, mean=None, std=None, logit_offset: float = 0.0):
         super().__init__()
         self.model = model
+        self.normalize = mean is not None
+        if self.normalize:
+            self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1))
+            self.register_buffer("std", torch.tensor(std, dtype=torch.float32).view(1, 3, 1, 1))
+        self.logit_offset = float(logit_offset)
 
     def forward(self, pixel_values: torch.Tensor):
+        if self.normalize:
+            pixel_values = (pixel_values - self.mean) / self.std
         out = self.model(pixel_values=pixel_values)
-        return out.logits, out.pred_boxes
+        return out.logits + self.logit_offset, out.pred_boxes
 
 
-def load_for_export(source: str) -> tuple[torch.nn.Module, int]:
+def load_for_export(source: str, logit_offset: float = 0.0) -> tuple[torch.nn.Module, int]:
     """Load a detector on CPU with eager attention; returns ``(wrapper, input_size)``."""
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
 
     repo, _, revision = source.partition("@")
     processor = AutoImageProcessor.from_pretrained(repo, revision=revision or None)
     model = AutoModelForObjectDetection.from_pretrained(repo, revision=revision or None, attn_implementation="eager")
-    if getattr(processor, "do_normalize", False):
-        raise ValueError("Kaya feeds [0, 1] pixels without mean/std normalization; this processor normalizes.")
+    mean, std = (
+        (processor.image_mean, processor.image_std) if getattr(processor, "do_normalize", False) else (None, None)
+    )
     size = processor.size["height"]
-    return _OnnxWrapper(model.eval().cpu()).eval(), size
+    return _OnnxWrapper(model.eval().cpu(), mean, std, logit_offset).eval(), size
 
 
-def export_onnx(source: str, output: Path, opset: int = OPSET) -> Path:
+def export_onnx(source: str, output: Path, opset: int = OPSET, logit_offset: float = 0.0) -> Path:
     """Export ``source`` (Hub repo id, ``repo@revision`` or local dir) to ``output``."""
-    wrapper, size = load_for_export(source)
+    wrapper, size = load_for_export(source, logit_offset)
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
         wrapper,
@@ -65,7 +77,9 @@ def export_onnx(source: str, output: Path, opset: int = OPSET) -> Path:
     return output
 
 
-def verify_onnx(source: str, onnx_path: Path, atol: float = 5e-2, seed: int = 0) -> dict[str, float]:
+def verify_onnx(
+    source: str, onnx_path: Path, atol: float = 5e-2, seed: int = 0, logit_offset: float = 0.0
+) -> dict[str, float]:
     """Compare PyTorch and ONNX Runtime outputs on a random input.
 
     Queries can come out permuted (top-k ties, attention numerics), so each
@@ -73,7 +87,7 @@ def verify_onnx(source: str, onnx_path: Path, atol: float = 5e-2, seed: int = 0)
     """
     import onnxruntime as ort
 
-    wrapper, size = load_for_export(source)
+    wrapper, size = load_for_export(source, logit_offset)
     x = torch.rand(1, 3, size, size, generator=torch.Generator().manual_seed(seed))
     with torch.no_grad():
         pt_logits, pt_boxes = (t[0].numpy() for t in wrapper(x))

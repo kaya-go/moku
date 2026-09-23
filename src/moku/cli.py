@@ -83,6 +83,7 @@ def eval_cmd(
     json_out: Path | None = typer.Option(None, "--json", help="Write metrics and per-board tables as JSON."),
     batch_size: int = typer.Option(8),
     device: str | None = typer.Option(None, help="cuda / mps / cpu (default: best available)."),
+    logit_offset: float = typer.Option(0.0, help="Evaluate as if exported with this logit offset (all models)."),
 ) -> None:
     """Evaluate models: detection metrics and end-to-end board metrics (Kaya pipeline).
 
@@ -99,7 +100,9 @@ def eval_cmd(
         results = []
         for source in models:
             with console.status(f"{source} on {split}…"):
-                results.append(evaluate(load_detector(source, device), ds[split], split, threshold, batch_size))
+                results.append(
+                    evaluate(load_detector(source, device), ds[split], split, threshold, batch_size, logit_offset)
+                )
         rows = []
         for r in results:
             d, b = r.detection, r.board
@@ -134,14 +137,15 @@ def eval_cmd(
                 )
             console.print(_table(deltas, f"{split}: paired difference vs {_short(results[0].model)} (90% CI)"))
         if sweep:
-            thresholds = [0.01, 0.02, 0.035, 0.05, 0.1, 0.2, 0.3, 0.5]
+            from moku.evaluation import SWEEP_THRESHOLDS
+
             sweep_rows = []
             for r in results:
-                table = threshold_sweep(r, thresholds)
+                table = threshold_sweep(r)
                 sweep_rows.append(
-                    {"model": _short(r.model), **{f"{t:g}": _pct(p) for t, p in zip(thresholds, table.perfect)}}
+                    {"model": _short(r.model), **{f"{t:g}": _pct(p) for t, p in zip(SWEEP_THRESHOLDS, table.perfect)}}
                 )
-            console.print(_table(sweep_rows, f"{split}: perfect boards vs stone threshold"))
+            console.print(_table(sweep_rows, f"{split}: perfect boards vs equivalent stone threshold (logit offset)"))
         if figures is not None:
             _save_worst(results, ds[split], split, figures, worst, threshold)
         report[split] = {
@@ -152,6 +156,68 @@ def eval_cmd(
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(report, indent=2, default=str))
         console.print(f"Wrote {json_out}")
+
+
+@app.command()
+def calibrate(
+    models: list[str] = typer.Argument(..., help="Hub repo ids, local dirs or hf://buckets/... checkpoints."),
+    fit: str = typer.Option("kaya-go/moku-v4:validation", help="dataset:split the offset is fitted on."),
+    check: list[str] = typer.Option(
+        ["kaya-go/moku-v4:test", "kaya-go/moku-gomrade:test"], "--check", help="dataset:split to check it on."
+    ),
+    json_out: Path | None = typer.Option(None, "--json"),
+    device: str | None = typer.Option(None),
+) -> None:
+    """Fit a per-model stone threshold (as a logit offset for the ONNX) and check it on held-out sets."""
+    from datasets import load_dataset
+
+    from moku.board import KAYA_STONE_THRESHOLD
+    from moku.evaluation import (
+        best_offset,
+        board_summary,
+        board_table,
+        evaluate,
+        is_perfect,
+        paired_difference,
+        shift_logits,
+    )
+    from moku.inference import load_detector
+
+    cache: dict = {}
+
+    def split_of(spec: str):
+        name, split = spec.rsplit(":", 1)
+        cache.setdefault(name, load_dataset(name))
+        return cache[name][split]
+
+    rows, report = [], {}
+    for source in models:
+        detector = load_detector(source, device)
+        with console.status(f"{source}: fitting on {fit}…"):
+            cal = best_offset(evaluate(detector, split_of(fit), fit))
+        report[source] = {"fit": fit, **cal, "checks": {}}
+        for spec in check:
+            with console.status(f"{source} on {spec}…"):
+                r = evaluate(detector, split_of(spec), spec)
+            shifted = board_table(shift_logits(r.predictions, cal["offset"]), r.targets)
+            a, b = board_summary(r.boards), board_summary(shifted)
+            d = paired_difference(r.boards.assign(p=is_perfect(r.boards)), shifted.assign(p=is_perfect(shifted)), "p")
+            report[source]["checks"][spec] = {"base": a, "calibrated": b, "delta_perfect": d}
+            rows.append(
+                {
+                    "model": _short(source),
+                    "threshold": f"{KAYA_STONE_THRESHOLD:g} → {cal['threshold']:g}",
+                    "offset": f"{cal['offset']:+.2f}",
+                    "set": spec,
+                    "perfect": f"{a['perfect']:.0%} → {b['perfect']:.0%}",
+                    "Δ perfect (paired)": f"{d['delta']:+.0%} [{d['ci'][0]:+.0%}, {d['ci'][1]:+.0%}]",
+                    "errors / board": f"{a['errors']:.1f} → {b['errors']:.1f}",
+                }
+            )
+    console.print(_table(rows, f"Stone threshold fitted on {fit}, applied as a logit offset (90% CI)"))
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(report, indent=2, default=str))
 
 
 def _save_worst(results, split_ds, split: str, out_dir: Path, worst: int, threshold: float) -> None:
@@ -177,20 +243,23 @@ def _save_worst(results, split_ds, split: str, out_dir: Path, worst: int, thresh
 
 @app.command()
 def export(
-    source: str = typer.Argument(..., help="Hub repo id (optionally @revision) or local model dir."),
+    source: str = typer.Argument(..., help="Hub repo id (optionally @revision), local dir or hf://buckets/..."),
     output: Path = typer.Option(Path("artifacts/model.onnx"), "--output", "-o"),
     opset: int = typer.Option(18),
     verify: bool = typer.Option(True, help="Compare ONNX Runtime outputs with PyTorch."),
     benchmark: bool = typer.Option(True, help="Single-thread CPU latency (proxy for Kaya's WASM)."),
+    logit_offset: float = typer.Option(0.0, help="Added to every class logit (from `moku calibrate`)."),
 ) -> None:
     """Export a detector to ONNX with Kaya's I/O contract (pixel_values → logits, pred_boxes)."""
     from moku.export import benchmark_onnx, export_onnx, verify_onnx
+    from moku.inference import resolve_source
 
+    source = resolve_source(source)
     with console.status("Exporting…"):
-        export_onnx(source, output, opset)
+        export_onnx(source, output, opset, logit_offset)
     console.print(f"Exported {output} ({output.stat().st_size / 1e6:.1f} MB)")
     if verify:
-        console.print("Verification passed:", verify_onnx(source, output))
+        console.print("Verification passed:", verify_onnx(source, output, logit_offset=logit_offset))
     if benchmark:
         console.print("Benchmark:", benchmark_onnx(output))
 
