@@ -81,7 +81,29 @@ def export_onnx(source: str, output: Path, opset: int = OPSET, logit_offset: flo
         do_constant_folding=True,
         dynamo=False,
     )
+    _fix_output_dims(output)
     return output
+
+
+def _fix_output_dims(path: Path) -> None:
+    """Declare every output dim but the batch as static (300 queries, 3 classes, 4 box coords).
+
+    The exporter names them after the last op (``Gatherlogits_dim_1`` for moku-v3,
+    ``Addlogits_dim_1`` with a logit offset), and some WebViews cannot resolve symbolic dims: Kaya
+    then retries with ``freeDimensionOverrides`` keyed by those names. Static dims need none.
+    """
+    import onnx
+    import onnxruntime as ort
+
+    session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    x = np.zeros((1, *session.get_inputs()[0].shape[1:]), dtype=np.float32)
+    shapes = {o.name: v.shape for o, v in zip(session.get_outputs(), session.run(None, {"pixel_values": x}))}
+    model = onnx.load(str(path))
+    for out in model.graph.output:
+        for dim, size in list(zip(out.type.tensor_type.shape.dim, shapes[out.name]))[1:]:
+            dim.ClearField("dim_param")
+            dim.dim_value = size
+    onnx.save(model, str(path))
 
 
 def verify_onnx(

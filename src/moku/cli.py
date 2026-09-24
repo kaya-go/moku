@@ -244,6 +244,55 @@ def _save_worst(results, split_ds, split: str, out_dir: Path, worst: int, thresh
 
 
 @app.command()
+def predict(
+    images: list[Path] = typer.Argument(..., help="Photos of a goban."),
+    model: str = typer.Option(..., help="model.onnx (as Kaya runs it), Hub repo id, local dir or bucket checkpoint."),
+    board_size: int = typer.Option(19),
+    threshold: float = typer.Option(0.035, help="Stone threshold (Kaya's default)."),
+    corners: str = typer.Option("head", help="Corner selection (see `moku eval`); kaya for models without the head."),
+    json_out: Path | None = typer.Option(None, "--json", help="Raw outputs + reconstruction, e.g. Kaya test fixtures."),
+) -> None:
+    """Read the position on photos with the Kaya pipeline (reference output for Kaya's port)."""
+    from PIL import Image
+
+    from moku.board import reconstruct_board
+    from moku.inference import load_detector
+
+    detector = load_detector(model)
+    fixtures = []
+    for path in images:
+        pred = detector.predict([Image.open(path)])[0]
+        r = reconstruct_board(
+            pred.logits, pred.boxes, pred.width, pred.height, board_size, threshold, corners, pred.corner_points
+        )
+        rows = ["".join(".XO"[v] for v in row) for row in r.grid]
+        console.print(f"[bold]{path.name}[/]: corners {[[round(float(v)) for v in c] for c in r.corners]}")
+        console.print("\n".join(rows))
+        fixtures.append(
+            {
+                "image": path.name,
+                "width": pred.width,
+                "height": pred.height,
+                "board_size": board_size,
+                "threshold": threshold,
+                "corner_method": corners,
+                "corners": r.corners.tolist(),  # TL, TR, BR, BL in image pixels
+                "corners_detected": r.corners_detected,
+                "grid": rows,  # . empty, X black, O white
+                "outputs": {
+                    "logits": pred.logits.tolist(),
+                    "pred_boxes": pred.boxes.tolist(),
+                    "corner_points": None if pred.corner_points is None else pred.corner_points.tolist(),
+                },
+            }
+        )
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(fixtures))
+        console.print(f"Wrote {json_out}")
+
+
+@app.command()
 def export(
     source: str = typer.Argument(..., help="Hub repo id (optionally @revision), local dir or hf://buckets/..."),
     output: Path = typer.Option(Path("artifacts/model.onnx"), "--output", "-o"),

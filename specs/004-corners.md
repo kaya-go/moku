@@ -72,7 +72,12 @@ only filters false corners outside the board, and it changes Kaya's 3-class cont
 - [x] F2 (`f2-v2-frozen-head128`): F1 with a 128-channel head, 100 epochs.
 - [x] Stone threshold calibrated on validation with the head's corners (`moku calibrate --corners head`):
   0.035 → 0.025 (offset +0.35); ONNX exported with it, verified, published privately as `kaya-go/moku-v4`.
-- [ ] Port to Kaya: read `corner_points`, run Kaya's corner selection on those points, switch to moku-v4.
+- [x] `kaya-go/moku-v4` made public (2026-09-24); ONNX re-exported with static output dims (only the
+  batch is symbolic: moku-v3's `Gatherlogits_dim_1` override keys do not exist in the new graph).
+- [x] `moku predict` (positions + raw outputs as Kaya test fixtures) and the Kaya guide
+  `docs/kaya-v4-integration.md`.
+- [ ] Port to Kaya (see the guide): read `corner_points`, run Kaya's corner selection on those points,
+  switch the model URL to moku-v4.
 
 ## Results
 

@@ -16,7 +16,7 @@ printed as tables or saved as files (PNG, JSON).
 - **Datasets**: `kaya-go/moku-v1`, `kaya-go/moku-v2`, `kaya-go/moku-v3` on Hugging Face Hub.
 - **Model in production**: `kaya-go/moku-v3` (fine-tuned RT-DETR r18vd, W&B run
   `r10_os3_lr3e-4_cosmin100`). Kaya downloads `kaya-go/moku-v3/resolve/main/model.onnx`.
-- **moku-v4 candidate** (private, not in Kaya yet): `kaya-go/moku-v4` = moku-v2 frozen + corner head
+- **moku-v4** (public, not in Kaya yet): `kaya-go/moku-v4` = moku-v2 frozen + corner head
   (run `f2-v2-frozen-head128`), ONNX exported with `--logit-offset 0.35`; extra output
   `corner_points` `(batch, 8, 3)`. See `specs/004-corners.md`.
 - **Kaya repo**: usually checked out at `../kaya`; board recognition lives in
@@ -40,6 +40,8 @@ printed as tables or saved as files (PNG, JSON).
 pixi run moku eval kaya-go/moku-v2 kaya-go/moku-v3 -s validation -s test --sweep  # compare models
 pixi run moku eval hf://buckets/hadim/moku-runs/<run>/best --figures reports/figs  # run checkpoint + worst boards
 pixi run moku export kaya-go/moku-v3 -o artifacts/model.onnx                         # ONNX + verify + latency
+pixi run moku predict photo.jpg --model artifacts/moku-v4/model.onnx --json fx.json   # position + Kaya fixtures
+pixi run moku calibrate <model> --corners head                                      # stone threshold → logit offset
 pixi run moku publish hf://buckets/hadim/moku-runs/<run>/best --repo kaya-go/moku-vN --onnx artifacts/model.onnx
 pixi run moku train launch <run> -- --model dfine-s --seed 1                         # HF Jobs, prints the job URL
 pixi run moku train preview-aug                                                      # augmented samples as JPEGs
@@ -77,7 +79,10 @@ Empty intersections are never detected — they are inferred from geometry.
 
 - **ONNX I/O**: input `pixel_values` `(batch, 3, 640, 640)` float32 RGB in [0, 1] (squashed resize,
   no mean/std normalization); outputs `logits` `(batch, 300, 3)` and `pred_boxes` `(batch, 300, 4)`
-  normalized `cxcywh`. Kaya hardcodes 300 queries and 3 classes.
+  normalized `cxcywh`. Kaya hardcodes 300 queries and 3 classes. Output dims are static except the batch.
+- **moku-v4 addition** (optional output, read by name): `corner_points` `(batch, 8, 3)` = `(x, y, score)`,
+  x/y normalized, score a probability; Kaya's corner selection runs on these points instead of the corner
+  queries. Integration guide for Kaya: `docs/kaya-v4-integration.md`.
 - **Post-processing** (in Kaya, ported to `src/moku/board.py`): sigmoid + argmax per query;
   stones kept above `0.035`; corners above `0.005`, deduplicated within 5% of the diagonal,
   top 4 (2–3 corners are completed geometrically); homography; snap to the nearest intersection.

@@ -2,13 +2,13 @@
 
 ## Current Status
 
-**Phase**: v3 in production. moku-v4 candidate published (private) as `kaya-go/moku-v4`:
+**Phase**: v3 in production. moku-v4 published (public) as `kaya-go/moku-v4`:
 moku-v2's detector (frozen) + a dense corner head (`corner_points` output) + the stone threshold
 calibration baked into the logits (+0.35, i.e. 0.035 → 0.025). Perfect boards, ONNX as Kaya will
 run it with the head's corners: validation 42%, test 44%, Gomrade 47% (moku-v3: 15 / 19 / 2%,
 moku-v2: 29 / 30 / 28%); corner failures 20–26% (v3: 55–79%). Details in `specs/004-corners.md`.
-Next: port the corner head to Kaya (read `corner_points`, Kaya's corner selection on those points)
-and switch Kaya to `kaya-go/moku-v4`. Plan: [kaya-go/moku#1](https://github.com/kaya-go/moku/issues/1).
+Next: port it to Kaya following `docs/kaya-v4-integration.md` (read `corner_points`, Kaya's corner
+selection on those points, model URL). Plan: [kaya-go/moku#1](https://github.com/kaya-go/moku/issues/1).
 
 ## Board-Level Evaluation (2026-09-23)
 
