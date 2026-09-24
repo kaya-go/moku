@@ -18,9 +18,10 @@ printed as tables or saved as files (PNG, JSON).
   `r10_os3_lr3e-4_cosmin100`). Kaya downloads `kaya-go/moku-v3/resolve/main/model.onnx`.
 - **moku-v4** (public, Kaya's default from kaya-go/kaya#194, not released yet): `kaya-go/moku-v4` =
   moku-v2 frozen + corner head (run `f2-v2-frozen-head128`), ONNX exported with `--logit-offset 0.35`;
-  extra output `corner_points` `(batch, 8, 3)`. See `specs/004-corners.md`. The Hub's
-  `model.safetensors` has no `corner_head.*` weights: export from the run checkpoint
-  (`runs/f2-v2-frozen-head128/best`), not from `kaya-go/moku-v4`, or the ONNX loses `corner_points`.
+  extra output `corner_points` `(batch, 8, 3)`. See `specs/004-corners.md`.
+  `moku export kaya-go/moku-v4 --logit-offset 0.35` reproduces the published `model.onnx` bit for bit.
+  `from_pretrained` drops `corner_head.*`: anything that loads a checkpoint must re-attach the head
+  with `load_corner_head` (`moku publish` once pushed weights without it).
 - **Kaya repo**: usually checked out at `../kaya`; board recognition lives in
   `packages/board-recognition/src/moku-*.ts`.
 
