@@ -16,9 +16,11 @@ printed as tables or saved as files (PNG, JSON).
 - **Datasets**: `kaya-go/moku-v1`, `kaya-go/moku-v2`, `kaya-go/moku-v3` on Hugging Face Hub.
 - **Model in production**: `kaya-go/moku-v3` (fine-tuned RT-DETR r18vd, W&B run
   `r10_os3_lr3e-4_cosmin100`). Kaya downloads `kaya-go/moku-v3/resolve/main/model.onnx`.
-- **moku-v4** (public, not in Kaya yet): `kaya-go/moku-v4` = moku-v2 frozen + corner head
-  (run `f2-v2-frozen-head128`), ONNX exported with `--logit-offset 0.35`; extra output
-  `corner_points` `(batch, 8, 3)`. See `specs/004-corners.md`.
+- **moku-v4** (public, Kaya's default from kaya-go/kaya#194, not released yet): `kaya-go/moku-v4` =
+  moku-v2 frozen + corner head (run `f2-v2-frozen-head128`), ONNX exported with `--logit-offset 0.35`;
+  extra output `corner_points` `(batch, 8, 3)`. See `specs/004-corners.md`. The Hub's
+  `model.safetensors` has no `corner_head.*` weights: export from the run checkpoint
+  (`runs/f2-v2-frozen-head128/best`), not from `kaya-go/moku-v4`, or the ONNX loses `corner_points`.
 - **Kaya repo**: usually checked out at `../kaya`; board recognition lives in
   `packages/board-recognition/src/moku-*.ts`.
 
@@ -86,6 +88,11 @@ Empty intersections are never detected — they are inferred from geometry.
 - **Post-processing** (in Kaya, ported to `src/moku/board.py`): sigmoid + argmax per query;
   stones kept above `0.035`; corners above `0.005`, deduplicated within 5% of the diagonal,
   top 4 (2–3 corners are completed geometrically); homography; snap to the nearest intersection.
+- **ONNX Runtime Web kernels**: the graph must load in Kaya's `onnxruntime-web` (1.24), whose WASM build
+  lacks kernels Python's ORT has. transformers 5 computes the sine position embedding in float64, and
+  float64 `Sin`/`Cos` fail there ("Could not find an implementation for Cos(7)"); `moku export` casts
+  them to float32 (`_float32_trig`). Python-side `verify_onnx` cannot catch this: load the ONNX in
+  Kaya (or with `onnxruntime-web` in bun) before publishing.
 - Kaya's build rejects a downloaded model smaller than 50 MB (`scripts/copy-assets.ts`) — a smaller
   model needs that check updated in Kaya.
 

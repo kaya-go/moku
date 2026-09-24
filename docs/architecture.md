@@ -107,7 +107,9 @@ v3 switches to **single-stage training** from COCO pretrained weights directly o
 
 ## ONNX Export
 
-- `moku export` (`src/moku/export.py`): `torch.onnx.export`, opset 18, dynamic batch axis.
+- `moku export` (`src/moku/export.py`): `torch.onnx.export`, opset 18, dynamic batch axis. Float64
+  `Sin`/`Cos` (transformers 5's position embedding) are rewritten to float32 after export, because
+  ONNX Runtime Web has no float64 kernel for them.
 - Verified against PyTorch with `onnxruntime` (queries matched by nearest box) before publishing.
 - Published as `model.onnx` next to the weights (`kaya-go/moku-v3`), which Kaya downloads.
 - I/O contract: `pixel_values` (RGB in [0, 1], 640×640, no normalization) → `logits` (300×3), `pred_boxes` (300×4 cxcywh).

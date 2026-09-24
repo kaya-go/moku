@@ -9,6 +9,9 @@ The exported graph is the contract with the Kaya app
   sigmoid) and ``pred_boxes``: ``(batch, 300, 4)`` normalized ``(cx, cy, w, h)``.
 
 Post-processing (thresholds, corner selection, grid mapping) stays in Kaya.
+
+The graph must load in ONNX Runtime Web, whose WASM build has fewer kernels than the Python
+CPU provider: see ``_float32_trig``.
 """
 
 from __future__ import annotations
@@ -82,7 +85,46 @@ def export_onnx(source: str, output: Path, opset: int = OPSET, logit_offset: flo
         dynamo=False,
     )
     _fix_output_dims(output)
+    _float32_trig(output)
     return output
+
+
+def _float32_trig(path: Path) -> int:
+    """Run float64 ``Sin``/``Cos`` nodes in float32; returns how many were rewritten.
+
+    transformers 5 computes RT-DETR's sine position embedding in float64, and the export keeps
+    it in the graph because its size comes from the feature map shape. ONNX Runtime Web (Kaya,
+    1.24) has no float64 kernel for ``Sin``/``Cos``, so the session fails to load ("Could not
+    find an implementation for Cos(7)") while Python's ONNX Runtime runs it fine. Each node
+    becomes ``Cast(float32) -> Sin/Cos -> Cast(float64)``: downstream types are unchanged and
+    the embedding moves by less than 1e-6 (float32 rounding of values in [-1, 1]).
+    """
+    import onnx
+    from onnx import TensorProto, helper, shape_inference
+
+    model = onnx.load(str(path))
+    dtypes = {
+        vi.name: vi.type.tensor_type.elem_type
+        for vi in (*shape_inference.infer_shapes(model).graph.value_info, *model.graph.input)
+    }
+    nodes, rewritten = [], 0
+    for node in model.graph.node:
+        if node.op_type not in ("Sin", "Cos") or dtypes.get(node.input[0]) != TensorProto.DOUBLE:
+            nodes.append(node)
+            continue
+        x32, y32 = f"{node.name}_input_f32", f"{node.name}_output_f32"
+        nodes += [
+            helper.make_node("Cast", [node.input[0]], [x32], to=TensorProto.FLOAT, name=f"{node.name}_cast_in"),
+            helper.make_node(node.op_type, [x32], [y32], name=node.name),
+            helper.make_node("Cast", [y32], [node.output[0]], to=TensorProto.DOUBLE, name=f"{node.name}_cast_out"),
+        ]
+        rewritten += 1
+    if rewritten:
+        del model.graph.node[:]
+        model.graph.node.extend(nodes)
+        onnx.checker.check_model(model)
+        onnx.save(model, str(path))
+    return rewritten
 
 
 def _fix_output_dims(path: Path) -> None:

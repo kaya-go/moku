@@ -50,6 +50,9 @@ Kaya) drop from 63–79% to 20–26%. See the table at the end.
 - Only `batch_size` is a symbolic dim; the others are static (300, 3, 4, 8). The
   `freeDimensionOverrides` fallback in `moku-detector.ts` only needs `batch_size: 1`. The keys
   `Gatherlogits_dim_1` / `Gatherpred_boxes_dim_*` were moku-v3's names and are harmless but unused.
+- The first published `model.onnx` computed 4 `Sin`/`Cos` nodes of the position embedding in
+  float64, which `onnxruntime-web` 1.24 cannot load (session creation fails at every optimization
+  level). The current export runs them in float32; outputs move by less than 1e-5.
 
 ## Post-processing change
 
