@@ -30,3 +30,6 @@ reports/
 
 # Data files
 data/
+
+# Playwright MCP session files
+.playwright-mcp/

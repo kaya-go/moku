@@ -16,31 +16,45 @@ printed as tables or saved as files (PNG, JSON).
 - **Datasets**: `kaya-go/moku-v1`, `kaya-go/moku-v2`, `kaya-go/moku-v3` on Hugging Face Hub.
 - **Model in production**: `kaya-go/moku-v3` (fine-tuned RT-DETR r18vd, W&B run
   `r10_os3_lr3e-4_cosmin100`). Kaya downloads `kaya-go/moku-v3/resolve/main/model.onnx`.
+- **moku-v4** (public, not in Kaya yet): `kaya-go/moku-v4` = moku-v2 frozen + corner head
+  (run `f2-v2-frozen-head128`), ONNX exported with `--logit-offset 0.35`; extra output
+  `corner_points` `(batch, 8, 3)`. See `specs/004-corners.md`.
 - **Kaya repo**: usually checked out at `../kaya`; board recognition lives in
   `packages/board-recognition/src/moku-*.ts`.
 
 ## Tech Stack & Environment
 
 - **Package Manager**: `pixi` (strictly enforced; do NOT use pip/conda directly).
-- **Training**: `scripts/train.py` is a self-contained PEP 723 script run on HF Jobs
-  (`hf jobs uv run ...`); it cannot import `moku`. Keep its dependency header in sync with `pixi.toml`.
-- **Tracking**: W&B project `hadim/moku` (best checkpoints are saved as W&B artifacts).
-- **Secrets**: `.env` (`WANDB_API_KEY`, `WANDB_ENTITY`, `WANDB_PROJECT`, `GEMINI_API_KEY`), loaded by the CLI.
+- **Training**: code in `src/moku/training/`, entry point `scripts/train.py`. `moku train launch` runs it on
+  HF Jobs in the pixi Docker image with the locked `cuda` environment (`pixi run --frozen -e cuda`), so
+  jobs use exactly `pixi.lock`. Jobs run in the `hadim` namespace (`kaya-go` has no credits);
+  `a100-large` is the default flavor (A10G/L40S were often unavailable).
+- **Tracking**: no W&B. Each run writes `config.json`, `metrics.jsonl`, `train.log`, `best/`, `last/`
+  and `summary.json` to the private bucket `hf://buckets/hadim/moku-runs/<run>/` (mounted at `/runs`);
+  `moku runs list|show|pull` read them back. Give the user the HF Jobs URL of every run launched.
+- **Secrets**: `.env` (`GEMINI_API_KEY`), loaded by the CLI; `hf auth login` for the Hub and Jobs.
 
 ## Commands
 
 ```bash
 pixi run moku eval kaya-go/moku-v2 kaya-go/moku-v3 -s validation -s test --sweep  # compare models
-pixi run moku eval wandb:model-<run>:latest --figures reports/figs                   # W&B checkpoint + worst boards
+pixi run moku eval hf://buckets/hadim/moku-runs/<run>/best --figures reports/figs  # run checkpoint + worst boards
 pixi run moku export kaya-go/moku-v3 -o artifacts/model.onnx                         # ONNX + verify + latency
-pixi run moku publish wandb:model-<run> --repo kaya-go/moku-vN --onnx artifacts/model.onnx
+pixi run moku predict photo.jpg --model artifacts/moku-v4/model.onnx --json fx.json   # position + Kaya fixtures
+pixi run moku calibrate <model> --corners head                                      # stone threshold → logit offset
+pixi run moku publish hf://buckets/hadim/moku-runs/<run>/best --repo kaya-go/moku-vN --onnx artifacts/model.onnx
+pixi run moku train launch <run> -- --model dfine-s --seed 1                         # HF Jobs, prints the job URL
+pixi run moku train preview-aug                                                      # augmented samples as JPEGs
+pixi run moku runs list | show <run> --plot reports/<run>.png | pull <run>          # follow runs from the bucket
 pixi run moku dataset stats | audit | build-v3
-pixi run moku annotate prepare | serve                                               # tools/annotator workflow
 pixi run moku generate --n 500                                                       # Gemini style transfer
 pixi run test && pixi run lint
 ```
 
 ## Docs
+
+- `specs/`: one spec per piece of work (why, acceptance criteria, design, tasks, results). **Spec-driven**:
+  write or update the spec before coding, keep its tasks/results current; it is the resume point.
 
 - `docs/architecture.md`: architecture decisions and design rationale.
 - `docs/dataset.md`: dataset sources, harmonization rules, and raw data location.
@@ -65,7 +79,10 @@ Empty intersections are never detected — they are inferred from geometry.
 
 - **ONNX I/O**: input `pixel_values` `(batch, 3, 640, 640)` float32 RGB in [0, 1] (squashed resize,
   no mean/std normalization); outputs `logits` `(batch, 300, 3)` and `pred_boxes` `(batch, 300, 4)`
-  normalized `cxcywh`. Kaya hardcodes 300 queries and 3 classes.
+  normalized `cxcywh`. Kaya hardcodes 300 queries and 3 classes. Output dims are static except the batch.
+- **moku-v4 addition** (optional output, read by name): `corner_points` `(batch, 8, 3)` = `(x, y, score)`,
+  x/y normalized, score a probability; Kaya's corner selection runs on these points instead of the corner
+  queries. Integration guide for Kaya: `docs/kaya-v4-integration.md`.
 - **Post-processing** (in Kaya, ported to `src/moku/board.py`): sigmoid + argmax per query;
   stones kept above `0.035`; corners above `0.005`, deduplicated within 5% of the diagonal,
   top 4 (2–3 corners are completed geometrically); homography; snap to the nearest intersection.
@@ -76,7 +93,8 @@ Empty intersections are never detected — they are inferred from geometry.
 
 Detection metrics (mAP@50, stone cdAP, corner R@4) are diagnostics. Models are compared on
 **board metrics** from `moku eval`: the Kaya pipeline reconstructs the position, which is compared
-with the position read from the annotations (perfect boards, errors per board, corner failures),
+with the position read from the annotations (perfect boards = exact position and located board,
+errors per board, corner failures),
 with bootstrap CIs over photos. Validation/test are ~50 images from ~30 distinct photos: report
 intervals, never a single number.
 
@@ -84,7 +102,8 @@ intervals, never a single number.
 
 - **Why**: Transformer-based detector, no NMS needed (simpler ONNX export), small ResNet-18 backbone suitable for browser inference, available in HF `transformers`.
 - **Base model**: `PekingU/rtdetr_r18vd`
-- **Training**: Fine-tune with HF `Trainer` API (`scripts/train.py`).
+- **Training**: plain PyTorch loop with the reference recipe (EMA, backbone lr multiplier, stop-augmentation),
+  see `specs/001-training-loop.md`. D-FINE-S is being evaluated as a replacement (`specs/002-dfine.md`).
 - **Export**: `torch.onnx.export` with dynamic axes for batch dimension (`moku export`).
 
 ## Rules & Guidelines

@@ -13,18 +13,22 @@ Board metrics — what the user actually gets. Kaya's pipeline (see
 :mod:`moku.board`) reconstructs the position, which is compared intersection by
 intersection with the position read from the ground-truth annotations:
 
-- ``perfect``: share of boards with zero wrong intersections;
+- ``perfect``: share of boards read exactly — zero wrong intersections **and** the board located
+  (no corner more than half a cell off). Without the second condition an empty board would count
+  as perfect for a model that detects nothing, whatever its corners;
 - ``errors``: mean number of wrong intersections per board;
 - ``corner_fail``: share of boards with a corner more than half a grid cell off.
 
 Test sets are small (tens of images, some being augmented copies of the same
 photo), so board metrics come with bootstrap confidence intervals resampled
-over photo clusters rather than images.
+over photo clusters rather than images. A cluster is the position (up to
+symmetry), or the ``source_dataset`` itself when it names a group such as
+``gomrade/<game>`` (frames of one game are not independent).
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pandas as pd
@@ -178,10 +182,32 @@ def corner_recall_at_k(preds: list[RawPrediction], targets: list[Target], k: int
     return float(np.mean(recalls)) if recalls else float("nan")
 
 
+def true_positive_scores(preds: list[RawPrediction], targets: list[Target], frac: float = 0.02) -> dict[str, float]:
+    """Calibration: median over GT objects of the best same-class score within ``frac`` of the diagonal.
+
+    Kaya thresholds raw scores (0.035 for stones, a 0.005 floor for corners), so
+    true objects scoring far above those values make the pipeline robust.
+    """
+    found: dict[str, list[float]] = {"stone": [], "corner": []}
+    for pred, target in zip(preds, targets):
+        probs = sigmoid(pred.logits)
+        centers = pred.boxes[:, :2] * [pred.width, pred.height]
+        radius = frac * np.hypot(target.width, target.height)
+        for cls in (*STONE_CLASSES, CORNER):
+            gt = target.centers[target.categories == cls]
+            if len(gt) == 0:
+                continue
+            near = np.hypot(*(gt[:, None, :] - centers[None, :, :]).transpose(2, 0, 1)) <= radius
+            best = np.where(near, probs[None, :, cls], 0.0).max(axis=1)
+            found["corner" if cls == CORNER else "stone"].extend(best.tolist())
+    return {f"{k}_tp_score": float(np.median(v)) if v else float("nan") for k, v in found.items()}
+
+
 def detection_metrics(preds: list[RawPrediction], targets: list[Target]) -> dict[str, float]:
     metrics = coco_map(preds, targets)
     metrics["stone_cdAP"] = float(np.mean([center_distance_ap(preds, targets, c) for c in STONE_CLASSES]))
     metrics["corner_R4"] = corner_recall_at_k(preds, targets)
+    metrics.update(true_positive_scores(preds, targets))
     return metrics
 
 
@@ -213,6 +239,7 @@ def board_table(
     preds: list[RawPrediction],
     targets: list[Target],
     threshold: float = KAYA_STONE_THRESHOLD,
+    corner_method: str = "kaya",
 ) -> pd.DataFrame:
     """One row per image with a full ground-truth board (4 corners): Kaya pipeline vs truth."""
     rows = []
@@ -220,13 +247,22 @@ def board_table(
         truth = truth_board(target.bboxes, target.categories)
         if truth is None:
             continue
-        result = reconstruct_board(pred.logits, pred.boxes, pred.width, pred.height, truth.board_size, threshold)
+        result = reconstruct_board(
+            pred.logits,
+            pred.boxes,
+            pred.width,
+            pred.height,
+            truth.board_size,
+            threshold,
+            corner_method,
+            pred.corner_points,
+        )
         rows.append(
             {
                 "index": i,
                 "source": target.source,
                 "board_size": truth.board_size,
-                "cluster": _photo_cluster(truth.grid, i),
+                "cluster": target.source if "/" in target.source else _photo_cluster(truth.grid, i),
                 "corners_found": result.n_corner_candidates,
                 "corner_err_cells": _corner_error_cells(result.corners, truth.corners, truth.board_size),
                 **compare_boards(result.grid, truth.grid),
@@ -253,15 +289,24 @@ def bootstrap_mean_ci(
     return float(np.quantile(means, alpha)), float(np.quantile(means, 1 - alpha))
 
 
+CORNER_FAIL_CELLS = 0.5
+
+
+def is_perfect(table: pd.DataFrame) -> pd.Series:
+    """Exact position and located board (see the module docstring)."""
+    return (table["errors"] == 0) & (table["corner_err_cells"] <= CORNER_FAIL_CELLS)
+
+
 def board_summary(table: pd.DataFrame, with_ci: bool = True) -> dict[str, float]:
-    perfect = (table["errors"] == 0).to_numpy(dtype=float)
+    perfect = is_perfect(table).to_numpy(dtype=float)
     summary = {
         "boards": len(table),
         "photos": int(table["cluster"].nunique()),
+        "empty": int((table["n_truth_stones"] == 0).sum()),
         "perfect": float(perfect.mean()),
         "errors": float(table["errors"].mean()),
         "le2_errors": float((table["errors"] <= 2).mean()),
-        "corner_fail": float((table["corner_err_cells"] > 0.5).mean()),
+        "corner_fail": float((table["corner_err_cells"] > CORNER_FAIL_CELLS).mean()),
     }
     if with_ci:
         summary["perfect_ci"] = bootstrap_mean_ci(perfect, table["cluster"].to_numpy())
@@ -289,6 +334,33 @@ class EvalResult:
     boards: pd.DataFrame
     predictions: list[RawPrediction] = field(repr=False)
     targets: list[Target] = field(repr=False)
+    corner_method: str = "kaya"
+
+    def with_corner_method(self, method: str, threshold: float = KAYA_STONE_THRESHOLD) -> EvalResult:
+        """The same predictions read with another corner selection (see ``reconstruct_board``)."""
+        boards = board_table(self.predictions, self.targets, threshold, method)
+        name = f"{self.model} [{method}]"
+        return replace(self, model=name, board=board_summary(boards), boards=boards, corner_method=method)
+
+
+def logit(p: float) -> float:
+    return float(np.log(p / (1 - p)))
+
+
+def stone_offset(threshold: float) -> float:
+    """Logit offset under which Kaya's fixed 0.035 threshold acts as ``threshold`` on the raw scores.
+
+    Added to *every* class logit (a per-class offset could change Kaya's argmax), it can be baked
+    into the ONNX (``moku export --logit-offset``) so that Kaya needs no per-model setting. The
+    corner score floor (0.005) moves with it; corner ranking does not change.
+    """
+    return logit(KAYA_STONE_THRESHOLD) - logit(threshold)
+
+
+def shift_logits(preds: list[RawPrediction], offset: float) -> list[RawPrediction]:
+    if not offset:
+        return preds
+    return [replace(p, logits=p.logits + offset) for p in preds]
 
 
 def evaluate(
@@ -297,10 +369,14 @@ def evaluate(
     split: str = "test",
     threshold: float = KAYA_STONE_THRESHOLD,
     batch_size: int = 8,
+    logit_offset: float = 0.0,
 ) -> EvalResult:
-    """Run ``detector`` on a dataset split and compute detection + board metrics."""
+    """Run ``detector`` on a dataset split and compute detection + board metrics.
+
+    ``logit_offset`` evaluates the model as if exported with that offset baked in.
+    """
     targets = [Target.from_example(ex) for ex in dataset_split.remove_columns("image")]
-    preds = run_detector(detector, (ex["image"] for ex in dataset_split), batch_size=batch_size)
+    preds = shift_logits(run_detector(detector, (ex["image"] for ex in dataset_split), batch_size), logit_offset)
     boards = board_table(preds, targets, threshold)
     return EvalResult(
         model=detector.name,
@@ -313,10 +389,24 @@ def evaluate(
     )
 
 
-def threshold_sweep(result: EvalResult, thresholds: list[float]) -> pd.DataFrame:
-    """Board metrics of already-computed predictions at several stone thresholds."""
+SWEEP_THRESHOLDS = (0.005, 0.01, 0.015, 0.02, 0.025, 0.035, 0.05, 0.07, 0.1, 0.15, 0.2, 0.3, 0.5)
+
+
+def threshold_sweep(result: EvalResult, thresholds=SWEEP_THRESHOLDS) -> pd.DataFrame:
+    """Board metrics at several equivalent stone thresholds, applied as logit offsets (as shipped)."""
     rows = []
     for t in thresholds:
-        s = board_summary(board_table(result.predictions, result.targets, t), with_ci=False)
-        rows.append({"threshold": t, **s})
+        offset = stone_offset(t)
+        boards = board_table(
+            shift_logits(result.predictions, offset), result.targets, corner_method=result.corner_method
+        )
+        s = board_summary(boards, with_ci=False)
+        rows.append({"threshold": t, "offset": offset, **s})
     return pd.DataFrame(rows)
+
+
+def best_offset(result: EvalResult, thresholds=SWEEP_THRESHOLDS) -> dict[str, float]:
+    """Calibration fitted on ``result`` (validation): most perfect boards, then fewest errors."""
+    sweep = threshold_sweep(result, thresholds)
+    best = sweep.sort_values(["perfect", "errors"], ascending=[False, True]).iloc[0]
+    return {"threshold": float(best["threshold"]), "offset": float(best["offset"])}

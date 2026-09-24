@@ -109,6 +109,31 @@ def compute_homography(src: np.ndarray, dst: np.ndarray) -> np.ndarray | None:
     return np.append(h, 1.0).reshape(3, 3)
 
 
+def fit_homography(src: np.ndarray, dst: np.ndarray) -> np.ndarray | None:
+    """Least-squares homography from N ≥ 4 point pairs (normalized DLT). Not part of Kaya's pipeline."""
+    src, dst = np.asarray(src, dtype=np.float64), np.asarray(dst, dtype=np.float64)
+    if len(src) < 4:
+        return None
+
+    def normalizer(points: np.ndarray) -> np.ndarray:
+        mean = points.mean(axis=0)
+        scale = np.sqrt(2) / max(np.mean(np.hypot(*(points - mean).T)), 1e-12)
+        return np.array([[scale, 0, -scale * mean[0]], [0, scale, -scale * mean[1]], [0, 0, 1]])
+
+    ts, td = normalizer(src), normalizer(dst)
+    s = apply_homography(ts, src)
+    d = apply_homography(td, dst)
+    rows = []
+    for (x, y), (u, v) in zip(s, d):
+        rows.append([-x, -y, -1, 0, 0, 0, u * x, u * y, u])
+        rows.append([0, 0, 0, -x, -y, -1, v * x, v * y, v])
+    _, sing, vt = np.linalg.svd(np.asarray(rows))
+    if sing[-2] < 1e-12:
+        return None
+    h = np.linalg.inv(td) @ vt[-1].reshape(3, 3) @ ts
+    return h / h[2, 2]
+
+
 def apply_homography(h: np.ndarray, points: np.ndarray) -> np.ndarray:
     points = np.asarray(points, dtype=np.float64).reshape(-1, 2)
     homogeneous = np.hstack([points, np.ones((len(points), 1))]) @ h.T
@@ -154,27 +179,31 @@ def _complete_three_corners(points: np.ndarray) -> np.ndarray:
     return best
 
 
-def select_corners(dets: Detections, width: int, height: int) -> tuple[np.ndarray, bool, int]:
-    """Kaya's corner selection. Returns ``(corners TL..BL, corners_detected, n_candidates)``."""
+def corner_candidates(dets: Detections, width: int, height: int) -> np.ndarray:
+    """Corner detections above the score floor, highest first, near-duplicates dropped."""
     keep = (dets.classes == CORNER) & (dets.scores >= CORNER_MIN_SCORE)
     centers, scores = dets.centers[keep], dets.scores[keep]
-    order = np.argsort(-scores, kind="stable")
-    centers = centers[order]
+    centers = centers[np.argsort(-scores, kind="stable")]
 
     min_dist = np.hypot(width, height) * CORNER_DEDUP_FRACTION
     kept: list[np.ndarray] = []
     for c in centers:
         if all(np.hypot(*(c - k)) >= min_dist for k in kept):
             kept.append(c)
+    return np.array(kept).reshape(-1, 2)
 
+
+def select_corners(dets: Detections, width: int, height: int) -> tuple[np.ndarray, bool, int]:
+    """Kaya's corner selection. Returns ``(corners TL..BL, corners_detected, n_candidates)``."""
+    kept = corner_candidates(dets, width, height)
     if len(kept) < 2:
         return inset_corners(width, height), False, len(kept)
     if len(kept) == 2:
         quad = _complete_two_corners(kept[0], kept[1], width, height)
     elif len(kept) == 3:
-        quad = _complete_three_corners(np.array(kept))
+        quad = _complete_three_corners(kept)
     else:
-        quad = np.array(kept[:4])
+        quad = kept[:4]
     corners = order_corners(quad)
 
     span = corners.max(axis=0) - corners.min(axis=0)
@@ -219,14 +248,38 @@ def reconstruct_board(
     height: int,
     board_size: int,
     threshold: float = KAYA_STONE_THRESHOLD,
+    corner_method: str = "kaya",
+    corner_points: np.ndarray | None = None,
 ) -> BoardResult:
-    """Full Kaya pipeline: raw detector outputs → position on a ``board_size`` grid."""
+    """Full Kaya pipeline: raw detector outputs → position on a ``board_size`` grid.
+
+    Not in Kaya yet: ``corner_method="fit"`` replaces Kaya's corner choice by the stone-fit
+    prototype (:mod:`moku.corner_fit`); ``"head"`` / ``"head+fit"`` take the corner candidates
+    from the corner head (``corner_points``, :mod:`moku.corner_head`) instead of the DETR queries.
+    """
     dets = decode_queries(logits, boxes, width, height)
-    corners, detected, n_candidates = select_corners(dets, width, height)
+    corner_dets = dets
+    if corner_method.startswith("head"):
+        if corner_points is None:
+            raise ValueError(f"corner method {corner_method!r} needs a model with the corner head")
+        corner_dets = Detections(
+            centers=corner_points[:, :2] * [width, height],
+            classes=np.full(len(corner_points), CORNER),
+            scores=corner_points[:, 2],
+        )
+    corners, detected, n_candidates = select_corners(corner_dets, width, height)
     if not detected:
         grid = np.zeros((board_size, board_size), dtype=np.int8)
         return BoardResult(grid=grid, corners=corners, corners_detected=False, n_corner_candidates=n_candidates)
     stone = (dets.classes != CORNER) & (dets.scores >= threshold)
+    if corner_method.endswith("fit"):
+        from moku.corner_fit import fit_corners
+
+        candidates = corner_candidates(corner_dets, width, height)
+        select = not corner_method.startswith("head")  # the head's quad is only refined
+        corners = fit_corners(corners, candidates, dets.centers[stone], board_size, select)
+    elif corner_method not in ("kaya", "head"):
+        raise ValueError(f"unknown corner method {corner_method!r}")
     cells = np.vectorize(_CELL_OF_CLASS.get)(dets.classes[stone]) if stone.any() else np.zeros(0, dtype=int)
     grid = snap_to_grid(dets.centers[stone], cells, dets.scores[stone], corners, board_size)
     return BoardResult(grid=grid, corners=corners, corners_detected=True, n_corner_candidates=n_candidates)

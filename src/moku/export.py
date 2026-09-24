@@ -19,37 +19,56 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from moku.corner_head import corner_points, load_corner_head
+
 OPSET = 18
+OUTPUTS = ("logits", "pred_boxes", "corner_points")  # corner_points only with the corner head
 
 
 class _OnnxWrapper(torch.nn.Module):
-    """Strip the HF output dataclass down to the ``(logits, pred_boxes)`` tuple."""
+    """Kaya's contract around a HF detector: [0, 1] pixels in, ``(logits, pred_boxes)`` out.
 
-    def __init__(self, model: torch.nn.Module):
+    Models that expect mean/std-normalized pixels get the normalization inside the graph, and
+    ``logit_offset`` (see ``moku.evaluation.stone_offset``) is added to every class logit.
+    """
+
+    def __init__(self, model: torch.nn.Module, mean=None, std=None, logit_offset: float = 0.0):
         super().__init__()
         self.model = model
+        self.normalize = mean is not None
+        if self.normalize:
+            self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32).view(1, 3, 1, 1))
+            self.register_buffer("std", torch.tensor(std, dtype=torch.float32).view(1, 3, 1, 1))
+        self.logit_offset = float(logit_offset)
 
     def forward(self, pixel_values: torch.Tensor):
+        if self.normalize:
+            pixel_values = (pixel_values - self.mean) / self.std
         out = self.model(pixel_values=pixel_values)
-        return out.logits, out.pred_boxes
+        points = corner_points(self.model, out)
+        if points is None:
+            return out.logits + self.logit_offset, out.pred_boxes
+        return out.logits + self.logit_offset, out.pred_boxes, points
 
 
-def load_for_export(source: str) -> tuple[torch.nn.Module, int]:
+def load_for_export(source: str, logit_offset: float = 0.0) -> tuple[torch.nn.Module, int]:
     """Load a detector on CPU with eager attention; returns ``(wrapper, input_size)``."""
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
 
     repo, _, revision = source.partition("@")
     processor = AutoImageProcessor.from_pretrained(repo, revision=revision or None)
     model = AutoModelForObjectDetection.from_pretrained(repo, revision=revision or None, attn_implementation="eager")
-    if getattr(processor, "do_normalize", False):
-        raise ValueError("Kaya feeds [0, 1] pixels without mean/std normalization; this processor normalizes.")
+    load_corner_head(model, repo, revision or None)
+    mean, std = (
+        (processor.image_mean, processor.image_std) if getattr(processor, "do_normalize", False) else (None, None)
+    )
     size = processor.size["height"]
-    return _OnnxWrapper(model.eval().cpu()).eval(), size
+    return _OnnxWrapper(model.eval().cpu(), mean, std, logit_offset).eval(), size
 
 
-def export_onnx(source: str, output: Path, opset: int = OPSET) -> Path:
+def export_onnx(source: str, output: Path, opset: int = OPSET, logit_offset: float = 0.0) -> Path:
     """Export ``source`` (Hub repo id, ``repo@revision`` or local dir) to ``output``."""
-    wrapper, size = load_for_export(source)
+    wrapper, size = load_for_export(source, logit_offset)
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(
         wrapper,
@@ -57,15 +76,39 @@ def export_onnx(source: str, output: Path, opset: int = OPSET) -> Path:
         str(output),
         opset_version=opset,
         input_names=["pixel_values"],
-        output_names=["logits", "pred_boxes"],
-        dynamic_axes={name: {0: "batch_size"} for name in ("pixel_values", "logits", "pred_boxes")},
+        output_names=list(OUTPUTS[: 3 if hasattr(wrapper.model, "corner_head") else 2]),
+        dynamic_axes={name: {0: "batch_size"} for name in ("pixel_values", *OUTPUTS)},
         do_constant_folding=True,
         dynamo=False,
     )
+    _fix_output_dims(output)
     return output
 
 
-def verify_onnx(source: str, onnx_path: Path, atol: float = 5e-2, seed: int = 0) -> dict[str, float]:
+def _fix_output_dims(path: Path) -> None:
+    """Declare every output dim but the batch as static (300 queries, 3 classes, 4 box coords).
+
+    The exporter names them after the last op (``Gatherlogits_dim_1`` for moku-v3,
+    ``Addlogits_dim_1`` with a logit offset), and some WebViews cannot resolve symbolic dims: Kaya
+    then retries with ``freeDimensionOverrides`` keyed by those names. Static dims need none.
+    """
+    import onnx
+    import onnxruntime as ort
+
+    session = ort.InferenceSession(str(path), providers=["CPUExecutionProvider"])
+    x = np.zeros((1, *session.get_inputs()[0].shape[1:]), dtype=np.float32)
+    shapes = {o.name: v.shape for o, v in zip(session.get_outputs(), session.run(None, {"pixel_values": x}))}
+    model = onnx.load(str(path))
+    for out in model.graph.output:
+        for dim, size in list(zip(out.type.tensor_type.shape.dim, shapes[out.name]))[1:]:
+            dim.ClearField("dim_param")
+            dim.dim_value = size
+    onnx.save(model, str(path))
+
+
+def verify_onnx(
+    source: str, onnx_path: Path, atol: float = 5e-2, seed: int = 0, logit_offset: float = 0.0
+) -> dict[str, float]:
     """Compare PyTorch and ONNX Runtime outputs on a random input.
 
     Queries can come out permuted (top-k ties, attention numerics), so each
@@ -73,17 +116,20 @@ def verify_onnx(source: str, onnx_path: Path, atol: float = 5e-2, seed: int = 0)
     """
     import onnxruntime as ort
 
-    wrapper, size = load_for_export(source)
+    wrapper, size = load_for_export(source, logit_offset)
     x = torch.rand(1, 3, size, size, generator=torch.Generator().manual_seed(seed))
     with torch.no_grad():
-        pt_logits, pt_boxes = (t[0].numpy() for t in wrapper(x))
+        pt = [t[0].numpy() for t in wrapper(x)]
     session = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
-    ort_logits, ort_boxes = (t[0] for t in session.run(["logits", "pred_boxes"], {"pixel_values": x.numpy()}))
+    ort_out = [t[0] for t in session.run(OUTPUTS[: len(pt)], {"pixel_values": x.numpy()})]
+    (pt_logits, pt_boxes), (ort_logits, ort_boxes) = pt[:2], ort_out[:2]
     match = np.abs(pt_boxes[:, None, :] - ort_boxes[None, :, :]).sum(-1).argmin(axis=1)
     diffs = {
         "logits_max_abs_diff": float(np.abs(pt_logits - ort_logits[match]).max()),
         "boxes_max_abs_diff": float(np.abs(pt_boxes - ort_boxes[match]).max()),
     }
+    if len(pt) == 3:
+        diffs["corner_points_max_abs_diff"] = float(np.abs(pt[2] - ort_out[2]).max())
     if max(diffs.values()) > atol:
         raise AssertionError(f"ONNX outputs differ from PyTorch beyond {atol}: {diffs}")
     return diffs

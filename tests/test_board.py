@@ -97,3 +97,47 @@ def test_order_corners_and_js_round():
     shuffled = CORNERS[[2, 0, 3, 1]]
     np.testing.assert_array_equal(order_corners(shuffled), CORNERS)
     np.testing.assert_array_equal(js_round(np.array([0.5, 1.5, -0.5, 2.49])), [1, 2, 0, 2])
+
+
+def test_fit_homography_recovers_exact_mapping():
+    from moku.board import fit_homography
+
+    unit = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
+    h = compute_homography(CORNERS, unit)
+    points = np.random.default_rng(0).uniform(100, 500, size=(30, 2))
+    fitted = fit_homography(points, apply_homography(h, points))
+    np.testing.assert_allclose(apply_homography(fitted, CORNERS), unit, atol=1e-6)
+
+
+def test_refine_corners_moves_a_misplaced_corner_back():
+    from moku.annotations import refine_corners
+
+    grid, bboxes, cats = _scene(19, seed=3)
+    moved = [list(b) for b in bboxes]
+    corner_idx = [i for i, c in enumerate(cats) if c == CORNER]
+    moved[corner_idx[0]][0] += 8  # ~0.3 cell off
+    result = refine_corners(moved, cats)
+    assert result is not None
+    fixed, shift = result
+    np.testing.assert_allclose(fixed[corner_idx[0]], bboxes[corner_idx[0]], atol=0.5)
+    assert 0.1 < shift < 0.6
+
+
+def test_stone_fit_rejects_a_confident_false_corner():
+    grid, bboxes, cats = _scene(19, seed=3)
+    # A false corner out-scores the true BL corner: Kaya keeps it and breaks the board.
+    logits, boxes = _perfect_outputs(bboxes + [[300 - 8, 250 - 8, 16, 16]], cats + [CORNER])
+    logits[len(bboxes), CORNER] = 6.0
+    kaya = reconstruct_board(logits, boxes, WIDTH, HEIGHT, 19)
+    fit = reconstruct_board(logits, boxes, WIDTH, HEIGHT, 19, corner_method="fit")
+    assert compare_boards(kaya.grid, grid)["errors"] > 0
+    assert compare_boards(fit.grid, grid)["errors"] == 0
+    np.testing.assert_allclose(fit.corners, CORNERS, atol=1.0)
+
+
+def test_stone_fit_keeps_correct_corners():
+    grid, bboxes, cats = _scene(13, seed=4)
+    logits, boxes = _perfect_outputs(bboxes, cats)
+    fit = reconstruct_board(logits, boxes, WIDTH, HEIGHT, 13, corner_method="fit")
+    assert compare_boards(fit.grid, grid)["errors"] == 0
+    np.testing.assert_allclose(fit.corners, CORNERS, atol=1.0)

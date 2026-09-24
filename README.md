@@ -40,7 +40,6 @@ pixi run moku export kaya-go/moku-v3 --output artifacts/model.onnx
 # Datasets and annotation
 pixi run moku dataset stats
 pixi run moku dataset audit            # annotations whose corners do not fit their stones
-pixi run moku annotate prepare && pixi run moku annotate serve
 
 pixi run test
 ```

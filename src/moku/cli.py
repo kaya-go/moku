@@ -1,7 +1,6 @@
 """``moku`` command line: evaluate, export, publish, build datasets, annotate, generate.
 
-Every command loads ``.env`` from the working directory first (``WANDB_*``,
-``GEMINI_API_KEY``, ``HF_TOKEN``).
+Every command loads ``.env`` from the working directory first (``GEMINI_API_KEY``).
 """
 
 from __future__ import annotations
@@ -18,13 +17,14 @@ from rich.table import Table
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 dataset_app = typer.Typer(no_args_is_help=True, help="Build, inspect and audit datasets.")
-annotate_app = typer.Typer(no_args_is_help=True, help="Prepare and serve annotator workspaces.")
+train_app = typer.Typer(no_args_is_help=True, help="Launch training jobs on HF Jobs and preview augmentation.")
+runs_app = typer.Typer(no_args_is_help=True, help="Follow training runs (metrics and checkpoints in the runs bucket).")
 app.add_typer(dataset_app, name="dataset")
-app.add_typer(annotate_app, name="annotate")
+app.add_typer(train_app, name="train")
+app.add_typer(runs_app, name="runs")
 console = Console(width=200)
 
 DEFAULT_DATASET = "kaya-go/moku-v3"
-ANNOTATOR_SERVER = Path(__file__).resolve().parents[2] / "tools" / "annotator" / "server.py"
 
 
 @app.callback()
@@ -60,12 +60,17 @@ def _num(value: float, ci: tuple[float, float] | None = None, signed: bool = Fal
 
 def _short(source: str) -> str:
     """``org/name`` → ``name``; paths → file or directory name."""
-    return Path(source.removeprefix("wandb:")).name or source
+    parts = Path(source).parts
+    if source.startswith("hf://buckets/") and len(parts) >= 2:
+        return f"{parts[-2]}/{parts[-1]}"  # <run>/<best|last>
+    return Path(source).name or source
 
 
 @app.command("eval")
 def eval_cmd(
-    models: list[str] = typer.Argument(..., help="Hub repo ids, local dirs, wandb:<artifact> or .onnx files."),
+    models: list[str] = typer.Argument(
+        ..., help="Hub repo ids, local dirs, hf://buckets/... checkpoints or .onnx files."
+    ),
     splits: list[str] = typer.Option(["test"], "--split", "-s", help="Dataset split(s) to evaluate."),
     dataset: str = typer.Option(DEFAULT_DATASET, help="HF dataset id."),
     threshold: float = typer.Option(0.035, help="Stone score threshold (Kaya's default)."),
@@ -75,6 +80,12 @@ def eval_cmd(
     json_out: Path | None = typer.Option(None, "--json", help="Write metrics and per-board tables as JSON."),
     batch_size: int = typer.Option(8),
     device: str | None = typer.Option(None, help="cuda / mps / cpu (default: best available)."),
+    logit_offset: float = typer.Option(0.0, help="Evaluate as if exported with this logit offset (all models)."),
+    corners: list[str] = typer.Option(
+        ["kaya"],
+        "--corners",
+        help="Corner selection(s): kaya, fit (stone fit), head, head+fit (corner head). Repeat to compare.",
+    ),
 ) -> None:
     """Evaluate models: detection metrics and end-to-end board metrics (Kaya pipeline).
 
@@ -82,7 +93,7 @@ def eval_cmd(
     """
     from datasets import load_dataset
 
-    from moku.evaluation import evaluate, paired_difference, threshold_sweep
+    from moku.evaluation import evaluate, is_perfect, paired_difference, threshold_sweep
     from moku.inference import load_detector
 
     ds = load_dataset(dataset)
@@ -91,7 +102,8 @@ def eval_cmd(
         results = []
         for source in models:
             with console.status(f"{source} on {split}…"):
-                results.append(evaluate(load_detector(source, device), ds[split], split, threshold, batch_size))
+                r = evaluate(load_detector(source, device), ds[split], split, threshold, batch_size, logit_offset)
+            results += [r if method == "kaya" else r.with_corner_method(method, threshold) for method in corners]
         rows = []
         for r in results:
             d, b = r.detection, r.board
@@ -108,12 +120,13 @@ def eval_cmd(
                 }
             )
         b0 = results[0].board
-        console.print(_table(rows, f"{split}: {b0['boards']} boards from ~{b0['photos']} distinct photos (90% CI)"))
+        title = f"{split}: {b0['boards']} boards ({b0['empty']} empty) from ~{b0['photos']} photos/games (90% CI)"
+        console.print(_table(rows, title))
         if len(results) > 1:
-            base = results[0].boards.assign(perfect=results[0].boards.errors == 0)
+            base = results[0].boards.assign(perfect=is_perfect(results[0].boards))
             deltas = []
             for r in results[1:]:
-                other = r.boards.assign(perfect=r.boards.errors == 0)
+                other = r.boards.assign(perfect=is_perfect(r.boards))
                 perfect = paired_difference(base, other, "perfect")
                 errors = paired_difference(base, other, "errors")
                 deltas.append(
@@ -125,14 +138,15 @@ def eval_cmd(
                 )
             console.print(_table(deltas, f"{split}: paired difference vs {_short(results[0].model)} (90% CI)"))
         if sweep:
-            thresholds = [0.01, 0.02, 0.035, 0.05, 0.1, 0.2, 0.3, 0.5]
+            from moku.evaluation import SWEEP_THRESHOLDS
+
             sweep_rows = []
             for r in results:
-                table = threshold_sweep(r, thresholds)
+                table = threshold_sweep(r)
                 sweep_rows.append(
-                    {"model": _short(r.model), **{f"{t:g}": _pct(p) for t, p in zip(thresholds, table.perfect)}}
+                    {"model": _short(r.model), **{f"{t:g}": _pct(p) for t, p in zip(SWEEP_THRESHOLDS, table.perfect)}}
                 )
-            console.print(_table(sweep_rows, f"{split}: perfect boards vs stone threshold"))
+            console.print(_table(sweep_rows, f"{split}: perfect boards vs equivalent stone threshold (logit offset)"))
         if figures is not None:
             _save_worst(results, ds[split], split, figures, worst, threshold)
         report[split] = {
@@ -143,6 +157,69 @@ def eval_cmd(
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(report, indent=2, default=str))
         console.print(f"Wrote {json_out}")
+
+
+@app.command()
+def calibrate(
+    models: list[str] = typer.Argument(..., help="Hub repo ids, local dirs or hf://buckets/... checkpoints."),
+    fit: str = typer.Option("kaya-go/moku-v4:validation", help="dataset:split the offset is fitted on."),
+    check: list[str] = typer.Option(
+        ["kaya-go/moku-v4:test", "kaya-go/moku-gomrade:test"], "--check", help="dataset:split to check it on."
+    ),
+    json_out: Path | None = typer.Option(None, "--json"),
+    device: str | None = typer.Option(None),
+    corners: str = typer.Option("kaya", help="Corner selection the boards are read with (see `moku eval`)."),
+) -> None:
+    """Fit a per-model stone threshold (as a logit offset for the ONNX) and check it on held-out sets."""
+    from datasets import load_dataset
+
+    from moku.board import KAYA_STONE_THRESHOLD
+    from moku.evaluation import (
+        best_offset,
+        board_summary,
+        board_table,
+        evaluate,
+        is_perfect,
+        paired_difference,
+        shift_logits,
+    )
+    from moku.inference import load_detector
+
+    cache: dict = {}
+
+    def split_of(spec: str):
+        name, split = spec.rsplit(":", 1)
+        cache.setdefault(name, load_dataset(name))
+        return cache[name][split]
+
+    rows, report = [], {}
+    for source in models:
+        detector = load_detector(source, device)
+        with console.status(f"{source}: fitting on {fit}…"):
+            cal = best_offset(evaluate(detector, split_of(fit), fit).with_corner_method(corners))
+        report[source] = {"fit": fit, **cal, "checks": {}}
+        for spec in check:
+            with console.status(f"{source} on {spec}…"):
+                r = evaluate(detector, split_of(spec), spec).with_corner_method(corners)
+            shifted = board_table(shift_logits(r.predictions, cal["offset"]), r.targets, corner_method=corners)
+            a, b = board_summary(r.boards), board_summary(shifted)
+            d = paired_difference(r.boards.assign(p=is_perfect(r.boards)), shifted.assign(p=is_perfect(shifted)), "p")
+            report[source]["checks"][spec] = {"base": a, "calibrated": b, "delta_perfect": d}
+            rows.append(
+                {
+                    "model": _short(source),
+                    "threshold": f"{KAYA_STONE_THRESHOLD:g} → {cal['threshold']:g}",
+                    "offset": f"{cal['offset']:+.2f}",
+                    "set": spec,
+                    "perfect": f"{a['perfect']:.0%} → {b['perfect']:.0%}",
+                    "Δ perfect (paired)": f"{d['delta']:+.0%} [{d['ci'][0]:+.0%}, {d['ci'][1]:+.0%}]",
+                    "errors / board": f"{a['errors']:.1f} → {b['errors']:.1f}",
+                }
+            )
+    console.print(_table(rows, f"Stone threshold fitted on {fit}, applied as a logit offset (90% CI)"))
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(report, indent=2, default=str))
 
 
 def _save_worst(results, split_ds, split: str, out_dir: Path, worst: int, threshold: float) -> None:
@@ -167,40 +244,97 @@ def _save_worst(results, split_ds, split: str, out_dir: Path, worst: int, thresh
 
 
 @app.command()
+def predict(
+    images: list[Path] = typer.Argument(..., help="Photos of a goban."),
+    model: str = typer.Option(..., help="model.onnx (as Kaya runs it), Hub repo id, local dir or bucket checkpoint."),
+    board_size: int = typer.Option(19),
+    threshold: float = typer.Option(0.035, help="Stone threshold (Kaya's default)."),
+    corners: str = typer.Option("head", help="Corner selection (see `moku eval`); kaya for models without the head."),
+    json_out: Path | None = typer.Option(None, "--json", help="Raw outputs + reconstruction, e.g. Kaya test fixtures."),
+) -> None:
+    """Read the position on photos with the Kaya pipeline (reference output for Kaya's port)."""
+    from PIL import Image
+
+    from moku.board import reconstruct_board
+    from moku.inference import load_detector
+
+    detector = load_detector(model)
+    fixtures = []
+    for path in images:
+        pred = detector.predict([Image.open(path)])[0]
+        r = reconstruct_board(
+            pred.logits, pred.boxes, pred.width, pred.height, board_size, threshold, corners, pred.corner_points
+        )
+        rows = ["".join(".XO"[v] for v in row) for row in r.grid]
+        console.print(f"[bold]{path.name}[/]: corners {[[round(float(v)) for v in c] for c in r.corners]}")
+        console.print("\n".join(rows))
+        fixtures.append(
+            {
+                "image": path.name,
+                "width": pred.width,
+                "height": pred.height,
+                "board_size": board_size,
+                "threshold": threshold,
+                "corner_method": corners,
+                "corners": r.corners.tolist(),  # TL, TR, BR, BL in image pixels
+                "corners_detected": r.corners_detected,
+                "grid": rows,  # . empty, X black, O white
+                "outputs": {
+                    "logits": pred.logits.tolist(),
+                    "pred_boxes": pred.boxes.tolist(),
+                    "corner_points": None if pred.corner_points is None else pred.corner_points.tolist(),
+                },
+            }
+        )
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(fixtures))
+        console.print(f"Wrote {json_out}")
+
+
+@app.command()
 def export(
-    source: str = typer.Argument(..., help="Hub repo id (optionally @revision) or local model dir."),
+    source: str = typer.Argument(..., help="Hub repo id (optionally @revision), local dir or hf://buckets/..."),
     output: Path = typer.Option(Path("artifacts/model.onnx"), "--output", "-o"),
     opset: int = typer.Option(18),
     verify: bool = typer.Option(True, help="Compare ONNX Runtime outputs with PyTorch."),
     benchmark: bool = typer.Option(True, help="Single-thread CPU latency (proxy for Kaya's WASM)."),
+    logit_offset: float = typer.Option(0.0, help="Added to every class logit (from `moku calibrate`)."),
 ) -> None:
     """Export a detector to ONNX with Kaya's I/O contract (pixel_values → logits, pred_boxes)."""
     from moku.export import benchmark_onnx, export_onnx, verify_onnx
+    from moku.inference import resolve_source
 
+    source = resolve_source(source)
     with console.status("Exporting…"):
-        export_onnx(source, output, opset)
+        export_onnx(source, output, opset, logit_offset)
     console.print(f"Exported {output} ({output.stat().st_size / 1e6:.1f} MB)")
     if verify:
-        console.print("Verification passed:", verify_onnx(source, output))
+        console.print("Verification passed:", verify_onnx(source, output, logit_offset=logit_offset))
     if benchmark:
         console.print("Benchmark:", benchmark_onnx(output))
 
 
 @app.command()
 def publish(
-    source: str = typer.Argument(..., help="wandb:<artifact>, local model dir or Hub repo id."),
+    source: str = typer.Argument(..., help="hf://buckets/... checkpoint, local model dir or Hub repo id."),
     repo: str = typer.Option(..., help="Target Hub repo, e.g. kaya-go/moku-v4."),
     onnx: Path | None = typer.Option(None, help="ONNX file to upload as model.onnx (see `moku export`)."),
     public: bool = typer.Option(False, help="Create the repo as public (default: private)."),
     base_model: str = typer.Option("PekingU/rtdetr_r18vd", help="Pretrained checkpoint, for the model card."),
     dataset: str = typer.Option(DEFAULT_DATASET),
+    corners: str = typer.Option("kaya", help="Corner selection the card's board metrics use (see `moku eval`)."),
+    logit_offset: float = typer.Option(0.0, help="Logit offset baked into --onnx (for the card)."),
 ) -> None:
-    """Push weights, processor, ONNX and a model card with test/validation metrics to the Hub."""
+    """Push weights, processor, ONNX and a model card with test/validation metrics to the Hub.
+
+    With ``--onnx``, the card's metrics are those of the ONNX as Kaya runs it (offset included).
+    """
     from datasets import load_dataset
 
     from moku.evaluation import evaluate
-    from moku.hub import model_card, publish_model, resolve_source
-    from moku.inference import load_detector
+    from moku.hub import model_card, publish_model
+    from moku.inference import load_detector, resolve_source
 
     path = resolve_source(source)
     ds = load_dataset(dataset)
@@ -210,14 +344,22 @@ def publish(
     ]
     for split in ("validation", "test"):
         with console.status(f"Evaluating on {split}…"):
-            r = evaluate(load_detector(path), ds[split], split)
+            r = evaluate(load_detector(str(onnx) if onnx else path), ds[split], split).with_corner_method(corners)
         d, b = r.detection, r.board
         lines.append(
             f"| {split} | {d['mAP@50']:.3f} | {d['stone_cdAP']:.3f} | {d['corner_R4']:.3f} "
             f"| {b['perfect']:.0%} [{b['perfect_ci'][0]:.0%}, {b['perfect_ci'][1]:.0%}] "
             f"| {b['errors']:.1f} [{b['errors_ci'][0]:.1f}, {b['errors_ci'][1]:.1f}] |"
         )
-    card = model_card(repo.split("/")[-1], "\n".join(lines), base_model=base_model, dataset=dataset)
+    card = model_card(
+        repo.split("/")[-1],
+        "\n".join(lines),
+        base_model=base_model,
+        dataset=dataset,
+        corner_head=r.predictions[0].corner_points is not None,
+        corners=corners,
+        logit_offset=logit_offset,
+    )
     console.print(card)
     url = publish_model(path, repo, private=not public, onnx_path=onnx, card=card)
     console.print(f"Published {url}")
@@ -283,35 +425,37 @@ def dataset_build_v3(
         console.print(f"Pushed https://huggingface.co/datasets/{push}")
 
 
-@annotate_app.command("prepare")
-def annotate_prepare(
-    dataset: str = typer.Option(DEFAULT_DATASET),
-    splits: list[str] = typer.Option(["validation", "test"], "--split", "-s"),
-    out: Path = typer.Option(Path("data/annotate")),
-    only_flagged: bool = typer.Option(False, help="Export only images flagged by `moku dataset audit`."),
+@dataset_app.command("build-v4")
+def dataset_build_v4(
+    roboflow: Path = typer.Option(..., help="Roboflow `my-go-detection` COCO export (unzipped)."),
+    push: str | None = typer.Option(None, help="Push to this Hub dataset repo (private), e.g. kaya-go/moku-v4."),
 ) -> None:
-    """Export dataset splits to an annotator workspace, flagging suspicious boards."""
-    from datasets import DatasetDict, load_dataset
+    """Build moku-v4: moku-v3 + Roboflow photos split by photo (see moku.external.build_v4)."""
+    from moku.external import build_v4
 
-    from moku.annotations import audit_boards, export_workspace
+    ds = build_v4(roboflow)
+    console.print(ds)
+    if push:
+        ds.push_to_hub(push, private=True)
+        console.print(f"Pushed https://huggingface.co/datasets/{push}")
 
-    ds = load_dataset(dataset)
-    subset = DatasetDict({s: ds[s] for s in splits})
-    n = export_workspace(subset, out, flagged=audit_boards(subset), only_flagged=only_flagged)
-    console.print(f"Exported {n} images to {out}. Next: moku annotate serve --data-dir {out}")
 
-
-@annotate_app.command("serve")
-def annotate_serve(
-    data_dir: Path = typer.Option(Path("data/annotate")),
-    output: Path | None = typer.Option(None, help="Corrections file (default: <data-dir>/corrected.json)."),
-    port: int = typer.Option(8765),
+@dataset_app.command("build-gomrade")
+def dataset_build_gomrade(
+    root: Path = typer.Option(..., help="Unzipped Kaggle Gomrade archive (contains dataset/, dataset2/)."),
+    frames_per_game: int = typer.Option(3),
+    push: str | None = typer.Option(None, help="Push to this Hub dataset repo (always private: CC BY-NC-ND)."),
 ) -> None:
-    """Serve the browser annotator (tools/annotator) on a workspace."""
-    cmd = [sys.executable, str(ANNOTATOR_SERVER), "--data-dir", str(data_dir), "--port", str(port)]
-    if output is not None:
-        cmd += ["--output", str(output)]
-    subprocess.run(cmd, check=False)
+    """Build the Gomrade evaluation set (test split only; never used for training)."""
+    from datasets import DatasetDict
+
+    from moku.external import load_gomrade
+
+    ds = DatasetDict({"test": load_gomrade(root, frames_per_game)})
+    console.print(ds)
+    if push:
+        ds.push_to_hub(push, private=True)
+        console.print(f"Pushed https://huggingface.co/datasets/{push}")
 
 
 @app.command()
@@ -327,3 +471,106 @@ def generate(
     from moku.generate import generate_conditioned
 
     asyncio.run(generate_conditioned(n, out_dir, model, prefix, workers, image_size))
+
+
+@train_app.command("launch", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def train_launch(
+    ctx: typer.Context,
+    run_name: str = typer.Argument(..., help="Run name (directory in the runs bucket)."),
+    flavor: str = typer.Option("a100-large", help="a10g-large is cheaper but often unavailable."),
+    timeout: str = typer.Option("3h"),
+    dry_run: bool = typer.Option(False, help="Print the hf jobs command without launching."),
+) -> None:
+    """Launch scripts/train.py on HF Jobs (pixi image, locked `cuda` env); extra arguments go to the script."""
+    from moku.runs import launch, launch_command
+
+    if dry_run:
+        console.print(" ".join(launch_command(run_name, ctx.args, flavor=flavor, timeout=timeout)))
+        return
+    console.print(f"{run_name}: {launch(run_name, ctx.args, flavor=flavor, timeout=timeout)}")
+
+
+@train_app.command("preview-aug")
+def train_preview_aug(
+    out: Path = typer.Option(Path("reports/augmentation")),
+    n: int = typer.Option(20),
+    light: bool = typer.Option(False, help="Preview the final-epochs pipeline (flips only)."),
+    dataset: str = typer.Option(DEFAULT_DATASET),
+    seed: int = typer.Option(0),
+) -> None:
+    """Save augmented training samples with their boxes, to eyeball the pipeline."""
+    from datasets import load_dataset
+
+    from moku.training.data import DetectionDataset, save_previews, train_augmentation, train_indices
+
+    split = load_dataset(dataset)["train"]
+    ds = DetectionDataset(split, train_indices(split), train_augmentation(strong=not light))
+    console.print(f"Saved {len(save_previews(ds, out, n, seed))} samples to {out}")
+
+
+def _run_row(name: str, run: dict) -> dict:
+    cfg, epochs, best = run["config"], run["epochs"], run["best"]
+    last = epochs.iloc[-1] if len(epochs) else {}
+    m = best.get("metrics", {})
+    return {
+        "run": name,
+        "model": cfg.get("model", "?"),
+        "status": run["summary"].get("status", "running"),
+        "epoch": f"{int(last.get('epoch', 0))}/{cfg.get('epochs', '?')}",
+        "img/s": float(last.get("img_per_s", float("nan"))),
+        "best ep": best.get("epoch", "-"),
+        "val perfect": _pct(m["perfect"]) if m else "-",
+        "val errors": _num(m["errors"]) if m else "-",
+        "corner fail": _pct(m["corner_fail"]) if m else "-",
+        "TP stone/corner": f"{m['stone_tp_score']:.2f}/{m['corner_tp_score']:.2f}" if m else "-",
+    }
+
+
+@runs_app.command("list")
+def runs_list(runs: list[str] = typer.Argument(None, help="Run names (default: every run in the bucket).")) -> None:
+    """One row per run: progress, throughput and best validation board metrics (EMA weights)."""
+    from moku.runs import fetch_run, list_runs, read_run
+
+    rows = [_run_row(name, read_run(fetch_run(name))) for name in (runs or list_runs())]
+    if rows:
+        console.print(_table(rows, "Training runs (best checkpoint = most perfect validation boards)"))
+
+
+@runs_app.command("show")
+def runs_show(
+    runs: list[str] = typer.Argument(..., help="One or more run names."),
+    plot: Path | None = typer.Option(None, help="Save training and validation curves to this PNG."),
+    every: int = typer.Option(1, help="Print one epoch out of N."),
+) -> None:
+    """Per-epoch validation metrics of runs (and their curves with --plot)."""
+    from moku.runs import fetch_run, plot_run, read_run
+
+    loaded = {name: read_run(fetch_run(name)) for name in runs}
+    for name, run in loaded.items():
+        epochs = run["epochs"]
+        cols = [
+            c
+            for c in (
+                "epoch",
+                "img_per_s",
+                "val/perfect",
+                "val/errors",
+                "val/corner_fail",
+                "val/mAP@50",
+                "val/stone_tp_score",
+                "val/corner_tp_score",
+            )
+            if c in epochs
+        ]
+        if len(epochs):
+            console.print(_table(epochs[cols].iloc[::every].to_dict("records"), name))
+    if plot is not None:
+        console.print(f"Saved {plot_run(loaded, plot)}")
+
+
+@runs_app.command("pull")
+def runs_pull(run: str, which: str = typer.Option("best", help="best or last")) -> None:
+    """Download a run's checkpoint under runs/<run>/<which>."""
+    from moku.runs import BUCKET_PREFIX, RUNS_BUCKET, pull_checkpoint
+
+    console.print(f"Downloaded to {pull_checkpoint(f'{BUCKET_PREFIX}{RUNS_BUCKET}/{run}/{which}')}")

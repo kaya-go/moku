@@ -80,7 +80,7 @@ Key advantages:
 ### Training Approach
 
 - Fine-tune from COCO-pretrained weights (`PekingU/rtdetr_r18vd`).
-- Use HF `Trainer` API with standard object detection training loop.
+- v1–v3: HF `Trainer` API. v4: plain PyTorch loop with the reference recipe (see `specs/001-training-loop.md`).
 - Training on M3 MacBook for small runs; HF Jobs for full training.
 
 ### v2 Two-Stage Training Strategy
@@ -160,25 +160,16 @@ Target: 500 synthetic train / 100 val / 100 test images.
 
 Scrape real goban images from Flickr (CC license) and Reddit r/baduk → run v1 model → human review via HTML/JS annotator tool → add corrected samples to v2 training set.
 
-### Corner Re-annotation (`tools/annotator/`)
-
-HTML/JS tool (served via `python -m http.server`) with canvas magnifier for re-annotating suspicious board_corners in the v1 dataset.
-
 ### Optional: RT-DETR r34vd
 
 RT-DETR r34vd (ResNet-34 backbone) doubles parameter count with the same ONNX export pipeline. Worth benchmarking after v2 data is assembled — but only if r18vd plateaus.
 
 ## Scripts
 
-### `scripts/train.py`
+### `scripts/train.py` and `moku.training`
 
-Self-contained (PEP 723) training script for HF Jobs: single-stage (v3) or two-stage (v2) training,
-per-epoch validation metrics, best checkpoint saved as a W&B artifact. See inline docstring for usage.
-
-### `scripts/launch_grid_r10.sh`
-
-Round 10 launcher — the recipe that produced moku-v3. Earlier rounds are in the git history.
-
-### `scripts/analyze_runs.py`
-
-W&B run analysis for a round (EMA smoothing, plateau detection).
+Entry point of the training loop in `src/moku/training/` (recipe and rationale in
+`specs/001-training-loop.md`). `moku train launch <run> -- <args>` runs it on HF Jobs in the pixi
+Docker image with the locked `cuda` environment; the run writes config, metrics, log and `best/` /
+`last/` checkpoints to the bucket `hadim/moku-runs`, read back with `moku runs list|show|pull`.
+The moku-v3 recipe (HF `Trainer`, W&B, round 10) is in the git history before `feat/v4-training`.
