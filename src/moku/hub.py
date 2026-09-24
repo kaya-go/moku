@@ -79,6 +79,22 @@ def model_card(
     )
 
 
+def load_for_publish(path: str):
+    """The detector as it should land on the Hub, corner head included.
+
+    ``from_pretrained`` drops ``corner_head.*`` (not part of the transformers architecture), so
+    the head is re-attached from the checkpoint. Without it, the Hub weights cannot reproduce
+    the ONNX's ``corner_points`` (``moku export kaya-go/moku-v4`` would export no corner head).
+    """
+    from transformers import AutoModelForObjectDetection
+
+    from moku.corner_head import load_corner_head
+
+    model = AutoModelForObjectDetection.from_pretrained(path)
+    load_corner_head(model, path)
+    return model
+
+
 def publish_model(
     source: str,
     repo_id: str,
@@ -88,12 +104,12 @@ def publish_model(
 ) -> str:
     """Push ``source`` (bucket checkpoint, local dir or Hub repo) to ``repo_id``."""
     from huggingface_hub import HfApi
-    from transformers import AutoImageProcessor, AutoModelForObjectDetection
+    from transformers import AutoImageProcessor
 
     path = resolve_source(source)
     api = HfApi()
     api.create_repo(repo_id, private=private, exist_ok=True)
-    AutoModelForObjectDetection.from_pretrained(path).push_to_hub(repo_id)
+    load_for_publish(path).push_to_hub(repo_id)
     AutoImageProcessor.from_pretrained(path).push_to_hub(repo_id)
     if onnx_path is not None:
         api.upload_file(path_or_fileobj=str(onnx_path), path_in_repo="model.onnx", repo_id=repo_id)
