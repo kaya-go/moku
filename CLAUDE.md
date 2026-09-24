@@ -45,7 +45,6 @@ pixi run moku train launch <run> -- --model dfine-s --seed 1                    
 pixi run moku train preview-aug                                                      # augmented samples as JPEGs
 pixi run moku runs list | show <run> --plot reports/<run>.png | pull <run>          # follow runs from the bucket
 pixi run moku dataset stats | audit | build-v3
-pixi run moku annotate prepare | serve                                               # tools/annotator workflow
 pixi run moku generate --n 500                                                       # Gemini style transfer
 pixi run test && pixi run lint
 ```

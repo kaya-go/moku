@@ -160,10 +160,6 @@ Target: 500 synthetic train / 100 val / 100 test images.
 
 Scrape real goban images from Flickr (CC license) and Reddit r/baduk → run v1 model → human review via HTML/JS annotator tool → add corrected samples to v2 training set.
 
-### Corner Re-annotation (`tools/annotator/`)
-
-HTML/JS tool (served via `python -m http.server`) with canvas magnifier for re-annotating suspicious board_corners in the v1 dataset.
-
 ### Optional: RT-DETR r34vd
 
 RT-DETR r34vd (ResNet-34 backbone) doubles parameter count with the same ONNX export pipeline. Worth benchmarking after v2 data is assembled — but only if r18vd plateaus.

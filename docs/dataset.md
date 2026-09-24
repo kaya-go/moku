@@ -117,7 +117,8 @@ moku-v3 (2026-09-23) it flags 77 of 382 real training images (7 with 3 corners, 
 stones colliding on one intersection, off the grid or far from it — misplaced corners or wrong
 annotations), 2 validation and 6 test images. Test image 49 has wrong corners (44 collisions);
 test images 11/24/27 (one photo, 3 augmentations) are very oblique shots where box centres drift
-towards the next intersection. `moku annotate prepare --only-flagged` exports them to the annotator.
+towards the next intersection. Misplaced corners are now corrected automatically from the stones
+(`refine_corners`, spec 004); the HTML annotator (`tools/annotator`) was removed on 2026-09-24.
 
 ## Reproducibility
 

@@ -10,8 +10,8 @@ platforms = [
 version = "0.2.0"
 
 [tasks]
-lint = "ruff check src scripts tools tests && ruff format --check src scripts tools tests"
-format = "ruff check --fix src scripts tools tests && ruff format src scripts tools tests"
+lint = "ruff check src scripts tests && ruff format --check src scripts tests"
+format = "ruff check --fix src scripts tests && ruff format src scripts tests"
 test = "pytest -q tests"
 
 [dependencies]

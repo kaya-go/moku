@@ -341,19 +341,22 @@ Best runs (by peak mAP@50 on val):
 
 | File | Role |
 |------|------|
-| `src/moku/cli.py` | `moku` CLI: `eval`, `export`, `publish`, `dataset`, `annotate`, `generate` |
+| `src/moku/cli.py` | `moku` CLI: `eval`, `calibrate`, `export`, `publish`, `train`, `runs`, `dataset`, `generate` |
 | `src/moku/board.py` | Port of Kaya's post-processing; ground-truth positions from annotations |
+| `src/moku/corner_head.py` | Dense corner head (moku-v4): training loss, in-graph decoding to `corner_points` |
+| `src/moku/corner_fit.py` | Corner selection / refinement on the detected stones (prototype, `--corners fit`) |
 | `src/moku/evaluation.py` | Detection + board metrics, bootstrap CIs, paired comparisons |
-| `src/moku/inference.py` | Run HF / W&B / ONNX models (Kaya preprocessing for ONNX) |
+| `src/moku/inference.py` | Run HF / bucket / ONNX models (Kaya preprocessing for ONNX), corner head included |
 | `src/moku/export.py` | ONNX export, verification, latency benchmark |
 | `src/moku/hub.py` | Publish weights, ONNX and model card to the Hub |
-| `src/moku/dataset.py` | Roboflow harmonization (v1/v2), v3 build |
-| `src/moku/annotations.py` | Corner/board audits, corrections, annotator workspaces, generated images |
+| `src/moku/dataset.py` | Roboflow harmonization (v1/v2), v3 / v4 builds |
+| `src/moku/external.py` | Gomrade and Roboflow `my-go-detection` converters (v4, Gomrade eval set) |
+| `src/moku/annotations.py` | Corner/board audits, corner correction from the stones, generated images |
 | `src/moku/synthetic.py` | Synthetic goban generator |
 | `src/moku/generate.py` | Gemini style transfer (synthetic → photorealistic) |
-| `src/moku/runs.py` | W&B API utilities |
-| `scripts/train.py` | Self-contained HF Jobs training script |
-| `tools/annotator/` | HTML/JS annotator app |
+| `src/moku/runs.py` | Launch HF Jobs, read runs back from the bucket |
+| `src/moku/training/` | Training loop (EMA, schedule, blockwise matcher, augmentation) |
+| `scripts/train.py` | Training entry point (every `TrainConfig` field is a flag) |
 
 Notebooks were removed on 2026-09-23; their logic lives in the modules above (git history keeps them).
 

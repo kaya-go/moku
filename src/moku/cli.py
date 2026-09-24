@@ -17,17 +17,14 @@ from rich.table import Table
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 dataset_app = typer.Typer(no_args_is_help=True, help="Build, inspect and audit datasets.")
-annotate_app = typer.Typer(no_args_is_help=True, help="Prepare and serve annotator workspaces.")
 train_app = typer.Typer(no_args_is_help=True, help="Launch training jobs on HF Jobs and preview augmentation.")
 runs_app = typer.Typer(no_args_is_help=True, help="Follow training runs (metrics and checkpoints in the runs bucket).")
 app.add_typer(dataset_app, name="dataset")
-app.add_typer(annotate_app, name="annotate")
 app.add_typer(train_app, name="train")
 app.add_typer(runs_app, name="runs")
 console = Console(width=200)
 
 DEFAULT_DATASET = "kaya-go/moku-v3"
-ANNOTATOR_SERVER = Path(__file__).resolve().parents[2] / "tools" / "annotator" / "server.py"
 
 
 @app.callback()
@@ -410,37 +407,6 @@ def dataset_build_gomrade(
     if push:
         ds.push_to_hub(push, private=True)
         console.print(f"Pushed https://huggingface.co/datasets/{push}")
-
-
-@annotate_app.command("prepare")
-def annotate_prepare(
-    dataset: str = typer.Option(DEFAULT_DATASET),
-    splits: list[str] = typer.Option(["validation", "test"], "--split", "-s"),
-    out: Path = typer.Option(Path("data/annotate")),
-    only_flagged: bool = typer.Option(False, help="Export only images flagged by `moku dataset audit`."),
-) -> None:
-    """Export dataset splits to an annotator workspace, flagging suspicious boards."""
-    from datasets import DatasetDict, load_dataset
-
-    from moku.annotations import audit_boards, export_workspace
-
-    ds = load_dataset(dataset)
-    subset = DatasetDict({s: ds[s] for s in splits})
-    n = export_workspace(subset, out, flagged=audit_boards(subset), only_flagged=only_flagged)
-    console.print(f"Exported {n} images to {out}. Next: moku annotate serve --data-dir {out}")
-
-
-@annotate_app.command("serve")
-def annotate_serve(
-    data_dir: Path = typer.Option(Path("data/annotate")),
-    output: Path | None = typer.Option(None, help="Corrections file (default: <data-dir>/corrected.json)."),
-    port: int = typer.Option(8765),
-) -> None:
-    """Serve the browser annotator (tools/annotator) on a workspace."""
-    cmd = [sys.executable, str(ANNOTATOR_SERVER), "--data-dir", str(data_dir), "--port", str(port)]
-    if output is not None:
-        cmd += ["--output", str(output)]
-    subprocess.run(cmd, check=False)
 
 
 @app.command()
