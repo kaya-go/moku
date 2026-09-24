@@ -14,9 +14,10 @@ printed as tables or saved as files (PNG, JSON).
   Board recognition must just work with no configuration on the user's side.
 - **HF Organization**: `kaya-go` on Hugging Face Hub.
 - **Datasets**: `kaya-go/moku-v1`, `kaya-go/moku-v2`, `kaya-go/moku-v3` on Hugging Face Hub.
-- **Model in production**: `kaya-go/moku-v3` (fine-tuned RT-DETR r18vd, W&B run
-  `r10_os3_lr3e-4_cosmin100`). Kaya downloads `kaya-go/moku-v3/resolve/main/model.onnx`.
-- **moku-v4** (public, Kaya's default from kaya-go/kaya#194, not released yet): `kaya-go/moku-v4` =
+- **Model in production**: `kaya-go/moku-v4` since Kaya 0.4.13 (kaya-go/kaya#194). Kaya downloads
+  `kaya-go/moku-v4/resolve/main/model.onnx`. Before that, `kaya-go/moku-v3` (fine-tuned RT-DETR
+  r18vd, W&B run `r10_os3_lr3e-4_cosmin100`).
+- **moku-v4**: `kaya-go/moku-v4` =
   moku-v2 frozen + corner head (run `f2-v2-frozen-head128`), ONNX exported with `--logit-offset 0.35`;
   extra output `corner_points` `(batch, 8, 3)`. See `specs/004-corners.md`.
   `moku export kaya-go/moku-v4 --logit-offset 0.35` reproduces the published `model.onnx` bit for bit.
