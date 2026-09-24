@@ -25,7 +25,7 @@ Kaya) drop from 63–79% to 20–26%. See the table at the end.
 
 | | moku-v3 | moku-v4 |
 |---|---|---|
-| Architecture | RT-DETR r18vd | moku-v2 (RT-DETR r18vd), unchanged and frozen, + a corner head (185k params) |
+| Architecture | RT-DETR r18vd | moku-v2 (RT-DETR r18vd), unchanged and frozen, + a corner head (443k params, 128 channels) |
 | `model.onnx` size | ~80 MB | 82.6 MB (Kaya's 50 MB minimum in `scripts/copy-assets.ts` still holds) |
 | Latency (1 thread, desktop CPU, ORT) | ~650 ms (measured on moku-v2, same detector) | ~660–700 ms (+2–9%) |
 
