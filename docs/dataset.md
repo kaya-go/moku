@@ -109,9 +109,19 @@ Each row in the dataset contains:
 
 The model must support photos with partial goban visibility (1–3 corners visible, close-up shots, angled photos). The current 3 categories handle this without extra labels. Dataset v2 explicitly includes partial board images (via synthetic generator crop mode) to improve robustness.
 
+## Annotation Quality
+
+`moku dataset audit` checks that each image's annotations describe a consistent position: the 4
+corners define a grid on which every stone should land alone and close to an intersection. On
+moku-v3 (2026-09-23) it flags 77 of 382 real training images (7 with 3 corners, the rest with
+stones colliding on one intersection, off the grid or far from it — misplaced corners or wrong
+annotations), 2 validation and 6 test images. Test image 49 has wrong corners (44 collisions);
+test images 11/24/27 (one photo, 3 augmentations) are very oblique shots where box centres drift
+towards the next intersection. `moku annotate prepare --only-flagged` exports them to the annotator.
+
 ## Reproducibility
 
-The dataset is built by running `notebooks/01_Build_Dataset.ipynb`. The harmonization logic lives in `src/moku/dataset.py` for reusability.
+The harmonization logic lives in `src/moku/dataset.py` (`build_dataset`). The raw Roboflow exports are not kept in the repo; the human corner corrections applied for v2 are in `annotations/v2_corner_corrections.json` (`moku.annotations.apply_corner_corrections`).
 
 ---
 
@@ -194,4 +204,4 @@ Generated images are added to train only.
 4. Keep val/test unchanged
 5. Push as `kaya-go/moku-v3` on HF Hub (single config, no sub-configs)
 
-Built via `notebooks/07_Build_Dataset_v3.ipynb`.
+Built with `moku dataset build-v3 --push kaya-go/moku-v3` (`moku.dataset.build_v3`).

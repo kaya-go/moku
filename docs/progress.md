@@ -2,7 +2,33 @@
 
 ## Current Status
 
-**Phase**: v3 model published — `model-r10_os3_lr3e-4_cosmin100` selected as moku-v3
+**Phase**: v3 in production. Repo reworked (notebooks → `moku` CLI, board-level evaluation).
+Next: moku-v4 — see the plan in [kaya-go/moku#1](https://github.com/kaya-go/moku/issues/1).
+
+## Board-Level Evaluation (2026-09-23)
+
+`moku eval` now rebuilds positions with a port of Kaya's post-processing (`src/moku/board.py`) and
+compares them with the positions read from the annotations. Results at Kaya's stone threshold
+(0.035), 90% bootstrap CIs over photos:
+
+| Model | Split | mAP@50 | corner R@4 | Perfect boards | Errors / board | Corner failures |
+|-------|-------|--------|------------|----------------|----------------|-----------------|
+| moku-v2 | validation | 0.749 | 0.821 | 44% [29–59] | 15.1 | 23% |
+| moku-v3 | validation | 0.900 | 0.805 | 17% [8–30] | 32.2 | 50% |
+| moku-v2 | test | 0.724 | 0.810 | 38% [26–52] | 40.3 | 40% |
+| moku-v3 | test | 0.862 | 0.825 | 32% [20–47] | 50.0 | 62% |
+
+- **mAP@50 does not track what users get.** v3 gained +14–15 mAP@50 points over v2, yet its
+  boards are worse: −27 points of perfect boards on validation (paired CI [−43, −7]), −6 on test
+  (CI [−18, +6]). Model selection on validation mAP@50 picked the wrong checkpoint family.
+- **Corners dominate the errors.** With ground-truth corners, v3's test errors drop from 50 to
+  ~6.6 per board: one false or missed corner among the top 4 breaks the homography and the whole board.
+- **Scores are badly calibrated.** True stones and corners score ~0.07 (median), so Kaya's
+  thresholds (0.035 stones, top-4 corners) sit on a knife edge; at 0.1 nearly every stone is lost.
+- **Training bug**: albumentations 2.x (resolved by HF Jobs from `albumentations>=1.4.20,<3`)
+  silently ignores `GaussNoise(var_limit=...)` and `RandomShadow(num_shadows_lower/upper=...)`,
+  so r5–r10 trained with σ≈51–112 Gaussian noise on 30% of images instead of σ≈5–20. Fixed in
+  `scripts/train.py`.
 
 ## v1 Results
 
@@ -306,25 +332,25 @@ Best runs (by peak mAP@50 on val):
 
 ---
 
-## Files to Create / Modify
+## Code Layout
 
-| File | Change |
-|------|--------|
-| `src/moku/model.py` | Model loading, eval transforms, collation utilities |
-| `src/moku/runs.py` | W&B API utilities (fetch runs, artifacts, load models) |
-| `src/moku/dataset.py` | Harmonization, corner corrections, v3 build (`load_annotated_generated`) |
+| File | Role |
+|------|------|
+| `src/moku/cli.py` | `moku` CLI: `eval`, `export`, `publish`, `dataset`, `annotate`, `generate` |
+| `src/moku/board.py` | Port of Kaya's post-processing; ground-truth positions from annotations |
+| `src/moku/evaluation.py` | Detection + board metrics, bootstrap CIs, paired comparisons |
+| `src/moku/inference.py` | Run HF / W&B / ONNX models (Kaya preprocessing for ONNX) |
+| `src/moku/export.py` | ONNX export, verification, latency benchmark |
+| `src/moku/hub.py` | Publish weights, ONNX and model card to the Hub |
+| `src/moku/dataset.py` | Roboflow harmonization (v1/v2), v3 build |
+| `src/moku/annotations.py` | Corner/board audits, corrections, annotator workspaces, generated images |
 | `src/moku/synthetic.py` | Synthetic goban generator |
-| `src/moku/generate.py` | Gemini image generation for goban photos |
-| `src/moku/annotator.py` | Annotator server utilities |
-| `src/moku/grid.py` | HP grid search helpers |
-| `scripts/train.py` | Two-stage training, W&B artifact saving |
+| `src/moku/generate.py` | Gemini style transfer (synthetic → photorealistic) |
+| `src/moku/runs.py` | W&B API utilities |
+| `scripts/train.py` | Self-contained HF Jobs training script |
 | `tools/annotator/` | HTML/JS annotator app |
-| `notebooks/05_Generate_Images.ipynb` | Gemini image generation |
-| `notebooks/06_Annotate_Generated.ipynb` | Pseudo-label + correct generated images |
-| `notebooks/07_Build_Dataset_v3.ipynb` | Merge v2 + generated → v3 dataset |
-| `notebooks/21_Evaluate.ipynb` | mAP + center-distance eval (HF Hub or W&B artifacts) |
-| `notebooks/30_Publish_Model.ipynb` | Select W&B artifact → push to HF Hub |
-| `notebooks/40_Export_ONNX.ipynb` | ONNX export for browser inference |
+
+Notebooks were removed on 2026-09-23; their logic lives in the modules above (git history keeps them).
 
 ---
 
@@ -367,3 +393,6 @@ Best runs (by peak mAP@50 on val):
 | 2026-03-23 | Fixed `__getitems__` batching bug | PyTorch ≥ 2.4 DataLoader + HF datasets set_transform → effective bs=1; all r5-r9 affected |
 | 2026-03-23 | Round 10: calibrated scheduler, 80-100 epochs | Budget-matched epochs, warmup_ratio=0.05, LR 1e-4–3e-4, OS3/OS5 |
 | 2026-03-23 | Selected `model-r10_os3_lr3e-4_cosmin100` as moku-v3 | Best test mAP@50 (0.862), corner_R4 (0.825); +14 pts over moku-v2 |
+| 2026-09-23 | Replace notebooks with the `moku` CLI | The user no longer runs code; every workflow must be scriptable |
+| 2026-09-23 | Board-level metrics become the decision metric | mAP@50 rose v2→v3 while perfect boards fell; the port of Kaya's pipeline measures what users get |
+| 2026-09-23 | Bump deps (Python 3.14, torch 2.13, transformers 5.16, albumentations 2.0.8 from PyPI) | conda-forge `simsimd` 7.x only ships `numkong`, which breaks `albucore`; PyPI wheels work |

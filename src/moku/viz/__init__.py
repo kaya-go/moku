@@ -1,24 +1,14 @@
-"""Visualization utilities for moku datasets."""
+"""Visualization utilities for moku datasets and predictions (static figures)."""
 
-from moku.viz._browse import browse_dataset, sample_metadata_html
-from moku.viz._constants import (
-    CATEGORY_COLORS,
-    CATEGORY_LINEWIDTHS,
-    HOSHI_POINTS,
-)
-from moku.viz._eval import plot_model_comparison
-from moku.viz._prediction import browse_predictions, render_prediction
+from moku.viz._constants import CATEGORY_COLORS, CATEGORY_LINEWIDTHS, HOSHI_POINTS
+from moku.viz._prediction import render_board_prediction
 from moku.viz._render import render_grid, render_sample_with_grid
 
 __all__ = [
     "CATEGORY_COLORS",
     "CATEGORY_LINEWIDTHS",
     "HOSHI_POINTS",
-    "browse_dataset",
-    "browse_predictions",
-    "plot_model_comparison",
+    "render_board_prediction",
     "render_grid",
-    "render_prediction",
     "render_sample_with_grid",
-    "sample_metadata_html",
 ]

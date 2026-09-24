@@ -1,13 +1,317 @@
+"""``moku`` command line: evaluate, export, publish, build datasets, annotate, generate.
+
+Every command loads ``.env`` from the working directory first (``WANDB_*``,
+``GEMINI_API_KEY``, ``HF_TOKEN``).
+"""
+
+from __future__ import annotations
+
 import asyncio
 import json
-import os
-import re
+import subprocess
+import sys
 from pathlib import Path
 
 import typer
-from rich.progress import BarColumn, MofNCompleteColumn, Progress, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.console import Console
+from rich.table import Table
 
-app = typer.Typer()
+app = typer.Typer(no_args_is_help=True, add_completion=False)
+dataset_app = typer.Typer(no_args_is_help=True, help="Build, inspect and audit datasets.")
+annotate_app = typer.Typer(no_args_is_help=True, help="Prepare and serve annotator workspaces.")
+app.add_typer(dataset_app, name="dataset")
+app.add_typer(annotate_app, name="annotate")
+console = Console(width=200)
+
+DEFAULT_DATASET = "kaya-go/moku-v3"
+ANNOTATOR_SERVER = Path(__file__).resolve().parents[2] / "tools" / "annotator" / "server.py"
+
+
+@app.callback()
+def _load_env() -> None:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path.cwd() / ".env")
+
+
+def _table(rows: list[dict], title: str) -> Table:
+    table = Table(title=title, title_justify="left")
+    for key in rows[0]:
+        table.add_column(key, justify="left" if key == "model" else "right")
+    for row in rows:
+        table.add_row(*[_fmt(v) for v in row.values()])
+    return table
+
+
+def _fmt(value) -> str:
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    return str(value)
+
+
+def _pct(value: float, ci: tuple[float, float] | None = None) -> str:
+    return f"{value:.0%}" + (f" [{ci[0]:.0%}–{ci[1]:.0%}]" if ci else "")
+
+
+def _num(value: float, ci: tuple[float, float] | None = None, signed: bool = False) -> str:
+    fmt = "+.1f" if signed else ".1f"
+    return f"{value:{fmt}}" + (f" [{ci[0]:{fmt}}, {ci[1]:{fmt}}]" if ci else "")
+
+
+def _short(source: str) -> str:
+    """``org/name`` → ``name``; paths → file or directory name."""
+    return Path(source.removeprefix("wandb:")).name or source
+
+
+@app.command("eval")
+def eval_cmd(
+    models: list[str] = typer.Argument(..., help="Hub repo ids, local dirs, wandb:<artifact> or .onnx files."),
+    splits: list[str] = typer.Option(["test"], "--split", "-s", help="Dataset split(s) to evaluate."),
+    dataset: str = typer.Option(DEFAULT_DATASET, help="HF dataset id."),
+    threshold: float = typer.Option(0.035, help="Stone score threshold (Kaya's default)."),
+    sweep: bool = typer.Option(False, help="Also report board metrics over a range of stone thresholds."),
+    figures: Path | None = typer.Option(None, help="Save the worst boards of each model as PNGs here."),
+    worst: int = typer.Option(6, help="Number of worst boards to render with --figures."),
+    json_out: Path | None = typer.Option(None, "--json", help="Write metrics and per-board tables as JSON."),
+    batch_size: int = typer.Option(8),
+    device: str | None = typer.Option(None, help="cuda / mps / cpu (default: best available)."),
+) -> None:
+    """Evaluate models: detection metrics and end-to-end board metrics (Kaya pipeline).
+
+    The first model is the baseline for paired comparisons.
+    """
+    from datasets import load_dataset
+
+    from moku.evaluation import evaluate, paired_difference, threshold_sweep
+    from moku.inference import load_detector
+
+    ds = load_dataset(dataset)
+    report: dict = {}
+    for split in splits:
+        results = []
+        for source in models:
+            with console.status(f"{source} on {split}…"):
+                results.append(evaluate(load_detector(source, device), ds[split], split, threshold, batch_size))
+        rows = []
+        for r in results:
+            d, b = r.detection, r.board
+            rows.append(
+                {
+                    "model": _short(r.model),
+                    "mAP@50": d["mAP@50"],
+                    "stone cdAP": d["stone_cdAP"],
+                    "corner R@4": d["corner_R4"],
+                    "perfect boards": _pct(b["perfect"], b["perfect_ci"]),
+                    "errors / board": _num(b["errors"], b["errors_ci"]),
+                    "≤2 errors": _pct(b["le2_errors"]),
+                    "corner fail": _pct(b["corner_fail"]),
+                }
+            )
+        b0 = results[0].board
+        console.print(_table(rows, f"{split}: {b0['boards']} boards from ~{b0['photos']} distinct photos (90% CI)"))
+        if len(results) > 1:
+            base = results[0].boards.assign(perfect=results[0].boards.errors == 0)
+            deltas = []
+            for r in results[1:]:
+                other = r.boards.assign(perfect=r.boards.errors == 0)
+                perfect = paired_difference(base, other, "perfect")
+                errors = paired_difference(base, other, "errors")
+                deltas.append(
+                    {
+                        "model": _short(r.model),
+                        "Δ perfect boards": f"{perfect['delta']:+.0%} [{perfect['ci'][0]:+.0%}, {perfect['ci'][1]:+.0%}]",
+                        "Δ errors / board": _num(errors["delta"], errors["ci"], signed=True),
+                    }
+                )
+            console.print(_table(deltas, f"{split}: paired difference vs {_short(results[0].model)} (90% CI)"))
+        if sweep:
+            thresholds = [0.01, 0.02, 0.035, 0.05, 0.1, 0.2, 0.3, 0.5]
+            sweep_rows = []
+            for r in results:
+                table = threshold_sweep(r, thresholds)
+                sweep_rows.append(
+                    {"model": _short(r.model), **{f"{t:g}": _pct(p) for t, p in zip(thresholds, table.perfect)}}
+                )
+            console.print(_table(sweep_rows, f"{split}: perfect boards vs stone threshold"))
+        if figures is not None:
+            _save_worst(results, ds[split], split, figures, worst, threshold)
+        report[split] = {
+            r.model: {"detection": r.detection, "board": r.board, "boards": r.boards.to_dict("records")}
+            for r in results
+        }
+    if json_out is not None:
+        json_out.parent.mkdir(parents=True, exist_ok=True)
+        json_out.write_text(json.dumps(report, indent=2, default=str))
+        console.print(f"Wrote {json_out}")
+
+
+def _save_worst(results, split_ds, split: str, out_dir: Path, worst: int, threshold: float) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    from moku.viz import render_board_prediction
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for r in results:
+        slug = r.model.replace("/", "_").replace(":", "_")
+        for row in r.boards.sort_values("errors", ascending=False).head(worst).itertuples():
+            title = f"{r.model} — {split}[{row.index}] ({row.source}) — {row.errors} wrong intersections"
+            fig = render_board_prediction(
+                split_ds[int(row.index)]["image"], r.predictions[row.index], r.targets[row.index], threshold, title
+            )
+            fig.savefig(out_dir / f"{slug}_{split}_{row.index:03d}.png", dpi=90)
+            plt.close(fig)
+    console.print(f"Saved figures to {out_dir}")
+
+
+@app.command()
+def export(
+    source: str = typer.Argument(..., help="Hub repo id (optionally @revision) or local model dir."),
+    output: Path = typer.Option(Path("artifacts/model.onnx"), "--output", "-o"),
+    opset: int = typer.Option(18),
+    verify: bool = typer.Option(True, help="Compare ONNX Runtime outputs with PyTorch."),
+    benchmark: bool = typer.Option(True, help="Single-thread CPU latency (proxy for Kaya's WASM)."),
+) -> None:
+    """Export a detector to ONNX with Kaya's I/O contract (pixel_values → logits, pred_boxes)."""
+    from moku.export import benchmark_onnx, export_onnx, verify_onnx
+
+    with console.status("Exporting…"):
+        export_onnx(source, output, opset)
+    console.print(f"Exported {output} ({output.stat().st_size / 1e6:.1f} MB)")
+    if verify:
+        console.print("Verification passed:", verify_onnx(source, output))
+    if benchmark:
+        console.print("Benchmark:", benchmark_onnx(output))
+
+
+@app.command()
+def publish(
+    source: str = typer.Argument(..., help="wandb:<artifact>, local model dir or Hub repo id."),
+    repo: str = typer.Option(..., help="Target Hub repo, e.g. kaya-go/moku-v4."),
+    onnx: Path | None = typer.Option(None, help="ONNX file to upload as model.onnx (see `moku export`)."),
+    public: bool = typer.Option(False, help="Create the repo as public (default: private)."),
+    base_model: str = typer.Option("PekingU/rtdetr_r18vd", help="Pretrained checkpoint, for the model card."),
+    dataset: str = typer.Option(DEFAULT_DATASET),
+) -> None:
+    """Push weights, processor, ONNX and a model card with test/validation metrics to the Hub."""
+    from datasets import load_dataset
+
+    from moku.evaluation import evaluate
+    from moku.hub import model_card, publish_model, resolve_source
+    from moku.inference import load_detector
+
+    path = resolve_source(source)
+    ds = load_dataset(dataset)
+    lines = [
+        "| split | mAP@50 | stone cdAP | corner R@4 | perfect boards | errors / board |",
+        "|---|---|---|---|---|---|",
+    ]
+    for split in ("validation", "test"):
+        with console.status(f"Evaluating on {split}…"):
+            r = evaluate(load_detector(path), ds[split], split)
+        d, b = r.detection, r.board
+        lines.append(
+            f"| {split} | {d['mAP@50']:.3f} | {d['stone_cdAP']:.3f} | {d['corner_R4']:.3f} "
+            f"| {b['perfect']:.0%} [{b['perfect_ci'][0]:.0%}, {b['perfect_ci'][1]:.0%}] "
+            f"| {b['errors']:.1f} [{b['errors_ci'][0]:.1f}, {b['errors_ci'][1]:.1f}] |"
+        )
+    card = model_card(repo.split("/")[-1], "\n".join(lines), base_model=base_model, dataset=dataset)
+    console.print(card)
+    url = publish_model(path, repo, private=not public, onnx_path=onnx, card=card)
+    console.print(f"Published {url}")
+
+
+@dataset_app.command("stats")
+def dataset_stats(dataset: str = typer.Option(DEFAULT_DATASET)) -> None:
+    """Images, objects and sources per split."""
+    from datasets import load_dataset
+
+    from moku.dataset import ID_TO_CATEGORY, compute_split_stats
+
+    rows = []
+    for split, ds in load_dataset(dataset).items():
+        s = compute_split_stats(ds)
+        rows.append(
+            {
+                "split": split,
+                "images": s["num_images"],
+                "objects/img": s["avg_objects_per_image"],
+                **{ID_TO_CATEGORY[c]: n for c, n in sorted(s["category_counts"].items())},
+                "sources": ", ".join(f"{k}: {v}" for k, v in s["source_counts"].most_common()),
+            }
+        )
+    console.print(_table(rows, dataset))
+
+
+@dataset_app.command("audit")
+def dataset_audit(
+    dataset: str = typer.Option(DEFAULT_DATASET),
+    out: Path | None = typer.Option(None, help="Write flagged images as CSV."),
+) -> None:
+    """Flag annotations whose corners do not define a clean grid for their stones."""
+    from datasets import load_dataset
+
+    from moku.annotations import audit_boards
+
+    flagged = audit_boards(load_dataset(dataset))
+    if flagged.empty:
+        console.print("No issues found.")
+        return
+    counts = flagged.groupby(["split", "source"]).size().reset_index(name="flagged")
+    console.print(_table(counts.to_dict("records"), f"{dataset} — images with inconsistent board annotations"))
+    if out is not None:
+        flagged.to_csv(out, index=False)
+        console.print(f"Wrote {out}")
+    else:
+        console.print(flagged.to_string(index=False))
+
+
+@dataset_app.command("build-v3")
+def dataset_build_v3(
+    generated_dir: Path = typer.Option(Path("data/annotate_generated"), help="Output of `moku generate`."),
+    push: str | None = typer.Option(None, help="Push to this Hub dataset repo (e.g. kaya-go/moku-v3)."),
+) -> None:
+    """Rebuild moku-v3: moku-v2 real images + generated images (train only)."""
+    from moku.dataset import build_v3
+
+    ds = build_v3(generated_dir)
+    console.print(ds)
+    if push:
+        ds.push_to_hub(push, private=False)
+        console.print(f"Pushed https://huggingface.co/datasets/{push}")
+
+
+@annotate_app.command("prepare")
+def annotate_prepare(
+    dataset: str = typer.Option(DEFAULT_DATASET),
+    splits: list[str] = typer.Option(["validation", "test"], "--split", "-s"),
+    out: Path = typer.Option(Path("data/annotate")),
+    only_flagged: bool = typer.Option(False, help="Export only images flagged by `moku dataset audit`."),
+) -> None:
+    """Export dataset splits to an annotator workspace, flagging suspicious boards."""
+    from datasets import DatasetDict, load_dataset
+
+    from moku.annotations import audit_boards, export_workspace
+
+    ds = load_dataset(dataset)
+    subset = DatasetDict({s: ds[s] for s in splits})
+    n = export_workspace(subset, out, flagged=audit_boards(subset), only_flagged=only_flagged)
+    console.print(f"Exported {n} images to {out}. Next: moku annotate serve --data-dir {out}")
+
+
+@annotate_app.command("serve")
+def annotate_serve(
+    data_dir: Path = typer.Option(Path("data/annotate")),
+    output: Path | None = typer.Option(None, help="Corrections file (default: <data-dir>/corrected.json)."),
+    port: int = typer.Option(8765),
+) -> None:
+    """Serve the browser annotator (tools/annotator) on a workspace."""
+    cmd = [sys.executable, str(ANNOTATOR_SERVER), "--data-dir", str(data_dir), "--port", str(port)]
+    if output is not None:
+        cmd += ["--output", str(output)]
+    subprocess.run(cmd, check=False)
 
 
 @app.command()
@@ -19,200 +323,7 @@ def generate(
     workers: int = typer.Option(10, "--workers", "-w", help="Number of parallel requests."),
     image_size: int = typer.Option(640, "--image-size", help="Synthetic image size."),
 ) -> None:
-    """Generate photorealistic goban images conditioned on synthetic inputs.
+    """Generate photorealistic goban images conditioned on synthetic inputs (Gemini, resumable)."""
+    from moku.generate import generate_conditioned
 
-    For each sample: generates a synthetic goban with perfect annotations,
-    sends it to Gemini for style transfer, and saves both the photorealistic
-    image and the COCO annotations. Resumable — skips already generated files.
-    """
-    asyncio.run(_generate_conditioned_async(n, out_dir, model, prefix, workers, image_size))
-
-
-async def _generate_conditioned_async(
-    n: int,
-    out_dir: Path,
-    model: str,
-    prefix: str,
-    workers: int,
-    image_size: int,
-) -> None:
-    from dotenv import load_dotenv
-    from google import genai
-
-    from moku.generate import make_style_transfer_prompt, synthetic_to_real_async
-    from moku.synthetic import generate_synthetic_sample
-
-    load_dotenv()
-
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        typer.echo("ERROR: GEMINI_API_KEY not set in environment or .env", err=True)
-        raise typer.Exit(1)
-
-    client = genai.Client(api_key=api_key)
-    images_dir = out_dir / "images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-
-    # Find already generated files to resume (need both .png and .json)
-    existing = set()
-    png_pattern = re.compile(rf"^{re.escape(prefix)}_(\d+)\.png$")
-    for p in images_dir.iterdir():
-        m = png_pattern.match(p.name)
-        if m:
-            idx_val = int(m.group(1))
-            json_path = images_dir / f"{prefix}_{idx_val:04d}.json"
-            if json_path.exists():
-                existing.add(idx_val)
-
-    if existing:
-        typer.echo(f"Resuming — {len(existing)} images already exist, skipping them.")
-
-    # Build list of indices to generate
-    indices: list[int] = []
-    idx = 0
-    while len(indices) < n - len(existing):
-        if idx not in existing:
-            indices.append(idx)
-        idx += 1
-
-    if not indices:
-        typer.echo(f"All {n} images already exist. Nothing to do.")
-        raise typer.Exit(0)
-
-    semaphore = asyncio.Semaphore(workers)
-    generated = len(existing)
-    total_failures = 0
-
-    board_sizes = [9, 13, 19]
-    board_weights = [0.15, 0.15, 0.7]
-
-    progress = Progress(
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        TimeRemainingColumn(),
-    )
-
-    async def _worker(target_idx: int) -> bool:
-        nonlocal generated, total_failures
-
-        import random
-
-        board_size = random.choices(board_sizes, weights=board_weights, k=1)[0]
-        max_retries = 3
-
-        for attempt in range(max_retries):
-            # Generate synthetic image + annotations
-            # ~40% of the time use a larger margin to give Gemini room
-            # for context objects around the board
-            margin_frac: float | None = None
-            if random.random() < 0.4:
-                margin_frac = random.uniform(0.05, 0.15)
-            synth_image, annotation = generate_synthetic_sample(
-                board_size=board_size,
-                image_size=image_size,
-                margin_frac=margin_frac,
-            )
-
-            prompt = make_style_transfer_prompt(board_size)
-
-            async with semaphore:
-                try:
-                    real_image = await synthetic_to_real_async(
-                        client,
-                        synth_image,
-                        prompt,
-                        model=model,
-                    )
-                except Exception as e:
-                    progress.console.print(f"  [red]Error idx={target_idx:04d}: {e}[/red]")
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(2**attempt)
-                        continue
-                    total_failures += 1
-                    return False
-
-            if real_image is not None:
-                filename = f"{prefix}_{target_idx:04d}.png"
-                path = images_dir / filename
-
-                # Resize Gemini output to match image_size
-                real_image = real_image.resize((image_size, image_size))
-                real_image.save(path)
-
-                # Save per-image annotation JSON (atomic per worker)
-                objects = annotation["objects"]
-                boxes_list = []
-                for ann_id, obj in enumerate(
-                    zip(
-                        objects["id"],
-                        objects["bbox"],
-                        objects["category"],
-                        objects["area"],
-                    )
-                ):
-                    obj_id, bbox, category, area = obj
-                    boxes_list.append(
-                        {
-                            "id": ann_id,
-                            "x": round(bbox[0], 2),
-                            "y": round(bbox[1], 2),
-                            "w": round(bbox[2], 2),
-                            "h": round(bbox[3], 2),
-                            "category": int(category),
-                        }
-                    )
-
-                ann_data = {
-                    "image": {
-                        "id": filename,
-                        "filename": filename,
-                        "width": image_size,
-                        "height": image_size,
-                        "source": "synthetic_conditioned",
-                        "board_size": board_size,
-                    },
-                    "boxes": boxes_list,
-                }
-                json_path = images_dir / f"{prefix}_{target_idx:04d}.json"
-                with open(json_path, "w") as jf:
-                    json.dump(ann_data, jf, indent=2)
-
-                generated += 1
-                progress.update(task, completed=generated)
-                return True
-
-            # No image returned — retry
-            if attempt < max_retries - 1:
-                await asyncio.sleep(1)
-
-        progress.console.print(f"  [yellow]No image for idx={target_idx:04d} after {max_retries} attempts[/yellow]")
-        total_failures += 1
-        return False
-
-    with progress:
-        task = progress.add_task(f"Generating conditioned (×{workers})", total=n, completed=generated)
-        tasks = [asyncio.create_task(_worker(i)) for i in indices]
-        await asyncio.gather(*tasks)
-
-    # Rebuild images.json from all per-image JSON files
-    images_json_path = out_dir / "images.json"
-    images_meta: list[dict] = []
-    annotations: dict[str, dict] = {}
-
-    for jf in sorted(images_dir.glob(f"{prefix}_*.json")):
-        with open(jf) as f:
-            ann_data = json.load(f)
-        img_meta = ann_data["image"]
-        images_meta.append(img_meta)
-        annotations[img_meta["filename"]] = {"boxes": ann_data["boxes"]}
-
-    output_data = {"images": images_meta, "annotations": annotations}
-    with open(images_json_path, "w") as f:
-        json.dump(output_data, f, indent=2)
-
-    n_total_boxes = sum(len(a["boxes"]) for a in annotations.values())
-    typer.echo(f"Done — {generated}/{n} images in {out_dir} ({total_failures} failures)")
-    typer.echo(f"Annotations: {n_total_boxes} boxes across {len(annotations)} images")
-    typer.echo(f"Launch annotator:  python tools/annotator/server.py --data-dir {out_dir}")
+    asyncio.run(generate_conditioned(n, out_dir, model, prefix, workers, image_size))

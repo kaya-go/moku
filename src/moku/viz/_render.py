@@ -1,4 +1,4 @@
-"""Rendering utilities for moku datasets (grid, sample, sample+grid)."""
+"""Rendering utilities for moku datasets (grid, annotated sample + grid)."""
 
 from __future__ import annotations
 
@@ -8,8 +8,8 @@ import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
 
+from moku.board import truth_board
 from moku.dataset import ID_TO_CATEGORY
-from moku.grid import annotations_to_grid
 from moku.viz._constants import CATEGORY_COLORS, CATEGORY_LINEWIDTHS, HOSHI_POINTS
 
 
@@ -77,15 +77,15 @@ def render_grid(grid: np.ndarray, ax: plt.Axes | None = None) -> plt.Axes:
 
 def render_sample_with_grid(
     sample: dict,
-    board_size: int = 19,
+    board_size: int | None = None,
     show_labels: bool = False,
     dpi: int = 100,
 ) -> bytes:
-    """Render annotated photo and inferred stone grid side by side.
+    """Render annotated photo and the position read from its annotations side by side.
 
     Args:
         sample: A single row from the harmonized HF dataset.
-        board_size: Number of lines on the board (9, 13, or 19).
+        board_size: Number of lines on the board; inferred from the stones when ``None``.
         show_labels: Whether to draw category labels on boxes.
         dpi: Output resolution.
 
@@ -116,17 +116,17 @@ def render_sample_with_grid(
     ax_img.axis("off")
     ax_img.set_title("Annotated photo", fontsize=10)
 
-    # Right panel: inferred grid
-    grid = annotations_to_grid(sample["objects"], board_size=board_size)
-    render_grid(grid, ax=ax_grid)
-
-    # Add stone count comparison to grid title
+    # Right panel: position read from the annotations (needs 4 corners)
+    truth = truth_board(sample["objects"]["bbox"], sample["objects"]["category"], board_size)
     n_stones_ann = sum(1 for c in sample["objects"]["category"] if c in (0, 1))
-    n_stones_grid = int(np.count_nonzero(grid))
-    ax_grid.set_title(
-        f"Inferred grid ({board_size}\u00d7{board_size}) \u2014 {n_stones_grid}/{n_stones_ann} stones mapped",
-        fontsize=10,
-    )
+    if truth is None:
+        ax_grid.axis("off")
+        ax_grid.set_title("No position: fewer than 4 annotated corners", fontsize=10)
+    else:
+        render_grid(truth.grid, ax=ax_grid)
+        n = truth.board_size
+        n_mapped = int(np.count_nonzero(truth.grid))
+        ax_grid.set_title(f"Position ({n}\u00d7{n}) \u2014 {n_mapped}/{n_stones_ann} stones mapped", fontsize=10)
 
     plt.tight_layout()
     buf = io.BytesIO()
